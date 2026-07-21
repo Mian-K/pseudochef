@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 repak = { git = "https://github.com/trumank/repak", version = "0.2.3" }
 shalrath = "0.2.6"
+unreal_asset = { git = "https://github.com/astrotechies/unrealmodding", rev = "79c6f34" }
