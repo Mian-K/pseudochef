@@ -416,6 +416,7 @@ dependencies = [
 name = "pseudochef"
 version = "0.1.0"
 dependencies = [
+ "ordered-float",
  "repak",
  "shalrath",
  "unreal_asset",
