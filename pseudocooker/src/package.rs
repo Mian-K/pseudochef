@@ -1,0 +1,449 @@
+//! Package assembly -- builds the full .uasset (header+name+import+export
+//! tables) and .uexp (concatenated export bodies + trailing tag) for a
+//! cooked UE5.1 StaticMesh package, from the three export bodies produced by
+//! `bodysetup` / `navcollision` / `staticmesh`.
+//!
+//! LOAD-PATH NOTES (verified by reading LinkerLoad.cpp / SavePackage2.cpp /
+//! AsyncLoading.cpp directly, not guessed):
+//!   - DependsOffset = 0: FLinkerLoad::SerializeDependsMap treats this as
+//!     "package saved badly" and returns immediately (LinkerLoad.cpp:2223-2227).
+//!     No depends section is written at all.
+//!   - PreloadDependencyCount / the PreloadDependency array is EMPHATICALLY
+//!     NOT optional, despite FLinkerLoad::SerializePreloadDependencies
+//!     happily skipping it when Count<1: the Event-Driven Loader (EDL) uses
+//!     exactly this data to sequence object creation, and a real
+//!     packaged/cooked game loads content through the EDL, not FLinkerLoad.
+//!     See the long comment on `exports` below for exactly which arcs we
+//!     emit and why (mirrors SavePackage2.cpp:1370-1586).
+//!   - AssetRegistryDataOffset: for a PKG_Cooked package, the Asset
+//!     Registry's FPackageReader::ReadAssetRegistryDataFromCookedPackage
+//!     derives asset info entirely from the already-parsed Name/Import/
+//!     Export maps -- it does NOT seek to or read AssetRegistryDataOffset
+//!     at all. Its value is therefore irrelevant; we set it to
+//!     TotalHeaderSize (an empty, harmless "section").
+
+use crate::bodysetup;
+use crate::core::{write_fname_ref, write_name_table_entry, Name, NameTable, Writer};
+use crate::mesh::RenderMesh;
+use crate::navcollision;
+use crate::staticmesh;
+
+const PACKAGE_FILE_TAG: u32 = 0x9E2A83C1;
+const PKG_FILTER_EDITOR_ONLY: u32 = 0x80000000;
+const PKG_COOKED: u32 = 0x00000200;
+
+/// Optional, explicit overrides for the package's random GUIDs. Leaving
+/// these `None` (the default) generates fresh random GUIDs exactly like the
+/// Python original's `uuid.uuid4()` calls; setting them lets callers (e.g.
+/// this crate's own byte-for-byte validation harness) produce fully
+/// deterministic, reproducible output.
+#[derive(Default, Clone)]
+pub struct CookOptions {
+    pub body_setup_guid: Option<String>,
+    pub lighting_guid: Option<String>,
+    pub package_guid: Option<String>,
+}
+
+fn new_guid_hex32() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    // Set RFC4122 version 4 / variant bits, matching uuid::uuid4() semantics
+    // (functionally inert for our purposes -- any 32 hex chars work as a
+    // Guid on disk -- but keeps this a faithful analogue of the original).
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    let mut s = String::with_capacity(32);
+    for b in bytes {
+        s.push_str(&format!("{:02X}", b));
+    }
+    s
+}
+
+fn write_engine_version_empty(w: &mut Writer) {
+    w.u16(0);
+    w.u16(0);
+    w.u16(0); // Major, Minor, Patch
+    w.u32(0); // Changelist
+    w.fstring(""); // Branch
+}
+
+struct ImportEntry {
+    class_package: &'static str,
+    class_name: &'static str,
+    outer_index: i32,
+    object_name: (&'static str, i32),
+}
+
+struct ExportEntry {
+    class_index: i32,
+    super_index: i32,
+    template_index: i32,
+    outer_index: i32,
+    object_name: (String, i32),
+    object_flags: u32,
+    b_is_asset: bool,
+    body: Vec<u8>,
+    patches: Vec<(usize, usize)>,
+    /// (SerializationBeforeSerialization, CreateBeforeSerialization,
+    ///  SerializationBeforeCreate, CreateBeforeCreate) -- see the long
+    /// comment on `exports` in cook_package for what these buckets mean.
+    preload_deps: (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>),
+}
+
+fn triangles_from_indices(flat_indices: &[u32]) -> Vec<(u32, u32, u32)> {
+    flat_indices.chunks(3).map(|c| (c[0], c[1], c[2])).collect()
+}
+
+fn material_per_triangle(mesh: &RenderMesh) -> Vec<u16> {
+    let mut out = vec![0u16; mesh.indices.len() / 3];
+    for sec in &mesh.sections {
+        let start_tri = sec.first_index / 3;
+        for t in start_tri..start_tri + sec.num_triangles {
+            out[t] = sec.material_index as u16;
+        }
+    }
+    out
+}
+
+/// `package_short_name`: e.g. "SM_Teapot" -- becomes /Game/<name> and the
+/// top-level StaticMesh export's object name.
+/// `mesh`: as returned by `mesh::build_render_mesh`.
+///
+/// Returns (uasset_bytes, uexp_bytes).
+pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookOptions) -> (Vec<u8>, Vec<u8>) {
+    let mut table = NameTable::new();
+
+    // --- export bodies (this interns all "content" FNames first, matching
+    //     the real name-table ordering: property/type names, then
+    //     import/export/package names) ---
+    let body_setup_guid = options.body_setup_guid.clone().unwrap_or_else(new_guid_hex32);
+    let lighting_guid = options.lighting_guid.clone().unwrap_or_else(new_guid_hex32);
+
+    let (body_setup_bytes, body_setup_patches) = bodysetup::write_body_setup(
+        &mut table,
+        &body_setup_guid,
+        &mesh.positions,
+        &triangles_from_indices(&mesh.indices),
+        &material_per_triangle(mesh),
+    );
+    let nav_collision_bytes = navcollision::write_nav_collision(&mut table);
+    let static_mesh_bytes = staticmesh::write_static_mesh(&mut table, mesh, 0, 1, &lighting_guid);
+
+    // --- import table (fixed shape -- establishes each export's UClass) ---
+    // Mirrors SM_Box's real 8-entry import table exactly.
+    let imports: Vec<ImportEntry> = vec![
+        ImportEntry { class_package: "/Script/Engine", class_name: "BodySetup", outer_index: -6, object_name: ("Default__BodySetup", 0) }, // [0]
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -6, object_name: ("BodySetup", 0) }, // [1]
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -6, object_name: ("StaticMesh", 0) }, // [2]
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -7, object_name: ("NavCollision", 0) }, // [3]
+        ImportEntry { class_package: "/Script/NavigationSystem", class_name: "NavCollision", outer_index: -7, object_name: ("Default__NavCollision", 0) }, // [4]
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Package", outer_index: 0, object_name: ("/Script/Engine", 0) }, // [5]
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Package", outer_index: 0, object_name: ("/Script/NavigationSystem", 0) }, // [6]
+        ImportEntry { class_package: "/Script/Engine", class_name: "StaticMesh", outer_index: -6, object_name: ("Default__StaticMesh", 0) }, // [7]
+    ];
+
+    // --- export table ---
+    // FPackageIndex encoding: N>0 -> export index N-1 (this file's own export
+    // table); N<0 -> import index -N-1.
+    //
+    // `preload_deps` mirrors SavePackage2.cpp:1370-1586's four dependency
+    // buckets (SerializationBeforeSerialization / CreateBeforeSerialization /
+    // SerializationBeforeCreate / CreateBeforeCreate), each a list of
+    // FPackageIndex ints, IN THAT ORDER -- this is what the Event-Driven
+    // Loader actually uses to sequence object creation across a package.
+    // Every export needs SerializationBeforeCreate={ClassIndex,TemplateIndex}
+    // (its class and archetype must exist before it can be constructed) and
+    // CreateBeforeCreate={OuterIndex} if it has a non-null Outer.
+    // StaticMesh additionally declares BodySetup+NavCollision as
+    // SerializationBeforeSerialization deps (its own Serialize() reads their
+    // FPackageIndex-typed fields directly).
+    //
+    // CROSS-CHECKED against the real corpus SM_Box.uasset's actual export
+    // table bytes: StaticMesh's BodySetup/NavCollision references land in
+    // bucket 2 (CreateBeforeSerialization -- picked up as NATIVE object
+    // dependencies, NOT bucket 1/GetPreloadDependencies, which is empty for
+    // all three real exports). Real observed dep counts: BodySetup=(0,0,2,1),
+    // NavCollision=(0,0,2,1), StaticMesh=(0,2,2,0).
+    let mut exports = vec![
+        ExportEntry {
+            class_index: -2,
+            super_index: 0,
+            template_index: -1,
+            outer_index: 3,
+            object_name: ("BodySetup".to_string(), 1),
+            object_flags: 0x8,
+            b_is_asset: false,
+            body: body_setup_bytes,
+            patches: body_setup_patches,
+            preload_deps: (vec![], vec![], vec![-2, -1], vec![3]),
+        },
+        ExportEntry {
+            class_index: -4,
+            super_index: 0,
+            template_index: -5,
+            outer_index: 3,
+            object_name: ("NavCollision".to_string(), 1),
+            object_flags: 0x8,
+            b_is_asset: false,
+            body: nav_collision_bytes,
+            patches: vec![],
+            preload_deps: (vec![], vec![], vec![-4, -5], vec![3]),
+        },
+        ExportEntry {
+            class_index: -3,
+            super_index: 0,
+            template_index: -8,
+            outer_index: 0,
+            object_name: (package_short_name.to_string(), 0),
+            object_flags: 0xB,
+            b_is_asset: true,
+            body: static_mesh_bytes,
+            patches: vec![],
+            preload_deps: (vec![], vec![1, 2], vec![-3, -8], vec![]), // [1,2] = BodySetup/NavCollision export refs
+        },
+    ];
+
+    // ------------------------------------------------------------------
+    // header (fixed-width fields; section 1) -- compute NameOffset first
+    // by writing a throwaway header of known width, since every field up
+    // to NameOffset is constant-size once PKG_FilterEditorOnly is set
+    // (LocalizationId / PersistentGuid are both absent).
+    // ------------------------------------------------------------------
+    let mut header = Writer::new();
+    header.u32(PACKAGE_FILE_TAG);
+    header.i32(-8); // LegacyFileVersion
+    header.i32(0); // LegacyUE3Version
+    header.i32(0); // FileVersionUE4
+    header.i32(0); // FileVersionUE5
+    header.i32(0); // FileVersionLicenseeUE
+    header.i32(0); // CustomVersionCount
+    let total_header_size_pos = header.tell();
+    header.i32(0); // TotalHeaderSize (patched below)
+    let package_name = format!("/Game/{}", package_short_name);
+    header.fstring(&package_name);
+    header.u32(PKG_FILTER_EDITOR_ONLY | PKG_COOKED);
+    let name_count_pos = header.tell();
+    header.i32(0); // NameCount (patched)
+    let name_offset_pos = header.tell();
+    header.i32(0); // NameOffset (patched)
+    header.i32(0); // SoftObjectPathsCount
+    let soft_object_paths_offset_pos = header.tell();
+    header.i32(0); // SoftObjectPathsOffset (== ImportOffset; patched)
+    // LocalizationId ABSENT (PKG_FilterEditorOnly set)
+    header.i32(0); // GatherableTextDataCount
+    header.i32(0); // GatherableTextDataOffset
+    let export_count_pos = header.tell();
+    header.i32(0); // ExportCount (patched)
+    let export_offset_pos = header.tell();
+    header.i32(0); // ExportOffset (patched)
+    let import_count_pos = header.tell();
+    header.i32(0); // ImportCount (patched)
+    let import_offset_pos = header.tell();
+    header.i32(0); // ImportOffset (patched)
+    header.i32(0); // DependsOffset = 0 (safely skipped on load -- see docs)
+    header.i32(0); // SoftPackageReferencesCount
+    header.i32(0); // SoftPackageReferencesOffset
+    header.i32(0); // SearchableNamesOffset
+    header.i32(0); // ThumbnailTableOffset
+    let package_guid = options.package_guid.clone().unwrap_or_else(new_guid_hex32);
+    header.fguid(&package_guid); // deprecated package Guid, still written
+    // PersistentGuid ABSENT (PKG_FilterEditorOnly set)
+    header.i32(1); // GenerationCount
+    let gen_export_count_pos = header.tell();
+    header.i32(0); // Generations[0].ExportCount (patched)
+    let gen_name_count_pos = header.tell();
+    header.i32(0); // Generations[0].NameCount (patched)
+    write_engine_version_empty(&mut header); // SavedByEngineVersion
+    write_engine_version_empty(&mut header); // CompatibleWithEngineVersion
+    header.u32(0); // CompressionFlags
+    header.i32(0); // CompressedChunkCount
+    header.u32(0); // PackageSource (not meaningful to reproduce -- section 1)
+    header.i32(0); // AdditionalPackagesToCookCount
+    let asset_registry_data_offset_pos = header.tell();
+    header.i32(0); // AssetRegistryDataOffset (patched -- see docs, value is inert)
+    let bulk_data_start_offset_pos = header.tell();
+    header.i64(0); // BulkDataStartOffset (patched)
+    header.i32(0); // WorldTileInfoDataOffset
+    header.i32(0); // ChunkIDCount
+    let preload_dependency_count_pos = header.tell();
+    header.i32(0); // PreloadDependencyCount (patched -- see the EDL note above)
+    let preload_dependency_offset_pos = header.tell();
+    header.i32(0); // PreloadDependencyOffset (patched)
+    let names_referenced_pos = header.tell();
+    header.i32(0); // NamesReferencedFromExportDataCount (patched, informational)
+    header.i64(-1); // PayloadTocOffset (unused; not IoStore/Zen container)
+
+    let name_offset = header.tell();
+
+    // --- import table (built FIRST so it interns its own names into `table`
+    //     -- the name table below must reflect ALL names, including these
+    //     and the export ObjectNames interned just after). Building the
+    //     name table before this step is the classic off-by-N trap here:
+    //     NameCount would then be patched to the FINAL (larger) table.names
+    //     length while the actual name-table bytes only covered the earlier
+    //     subset, desyncing every NameIndex used anywhere after that
+    //     point. ---
+    let mut import_table_w = Writer::new();
+    for imp_entry in &imports {
+        write_fname_ref(&mut import_table_w, &mut table, imp_entry.class_package);
+        write_fname_ref(&mut import_table_w, &mut table, imp_entry.class_name);
+        import_table_w.i32(imp_entry.outer_index);
+        write_fname_ref(&mut import_table_w, &mut table, Name::from((imp_entry.object_name.0, imp_entry.object_name.1)));
+        // bImportOptional: real observed value in the corpus SM_Box.uasset
+        // is False for all 8 imports.
+        import_table_w.ubool(false); // bImportOptional
+    }
+
+    // Pre-intern export ObjectNames too (export_table_w itself is built
+    // further below, once total_header_size is known for SerialOffset).
+    for e in &exports {
+        table.intern(&e.object_name.0);
+    }
+
+    // --- name table (table.names is now complete) ---
+    let mut name_table_w = Writer::new();
+    for name in &table.names {
+        write_name_table_entry(&mut name_table_w, name);
+    }
+
+    let import_offset = name_offset + name_table_w.tell();
+    let export_offset = import_offset + import_table_w.tell();
+
+    // --- export table (SerialOffset/SerialSize need final TotalHeaderSize,
+    //     so we compute those in a second pass just below) ---
+    let mut export_table_w = Writer::new();
+
+    let total_export_body_size: usize = exports.iter().map(|e| e.body.len()).sum();
+
+    // --- PreloadDependency array (section-1-style trailing header section;
+    //     see the long comment on `exports` above for why this exists).
+    //     Written in SavePackage2.cpp's bucket order: SerializationBefore-
+    //     Serialization, CreateBeforeSerialization, SerializationBeforeCreate,
+    //     CreateBeforeCreate. Each export's FirstExportDependency is the
+    //     shared array's running start index at the time we reach it. ---
+    let mut preload_dependency_array: Vec<i32> = Vec::new();
+    let mut first_export_dependency: Vec<i32> = Vec::with_capacity(exports.len());
+    let mut dep_counts: Vec<(i32, i32, i32, i32)> = Vec::with_capacity(exports.len());
+    for e in &exports {
+        let (ser_before_ser, create_before_ser, ser_before_create, create_before_create) = &e.preload_deps;
+        let any = !ser_before_ser.is_empty()
+            || !create_before_ser.is_empty()
+            || !ser_before_create.is_empty()
+            || !create_before_create.is_empty();
+        first_export_dependency.push(if any { preload_dependency_array.len() as i32 } else { -1 });
+        preload_dependency_array.extend(ser_before_ser);
+        preload_dependency_array.extend(create_before_ser);
+        preload_dependency_array.extend(ser_before_create);
+        preload_dependency_array.extend(create_before_create);
+        dep_counts.push((
+            ser_before_ser.len() as i32,
+            create_before_ser.len() as i32,
+            ser_before_create.len() as i32,
+            create_before_create.len() as i32,
+        ));
+    }
+
+    // 96 bytes/entry: 4*4 (Class/Super/Template/OuterIndex) + 8 (ObjectName)
+    // + 4 (ObjectFlags) + 8+8 (SerialSize/SerialOffset as int64) + 4*8 (the
+    // eight bool/uint32 fields) + 4*5 (dependency ints) = 96.
+    let export_table_size = exports.len() * 96;
+    let preload_dependency_offset = export_offset + export_table_size;
+    let total_header_size = preload_dependency_offset + preload_dependency_array.len() * 4;
+
+    let mut running_offset = 0usize;
+    let mut export_serial_offsets = Vec::with_capacity(exports.len());
+    for e in &exports {
+        export_serial_offsets.push(running_offset);
+        running_offset += e.body.len();
+    }
+
+    for (i, e) in exports.iter().enumerate() {
+        export_table_w.i32(e.class_index);
+        export_table_w.i32(e.super_index);
+        export_table_w.i32(e.template_index);
+        export_table_w.i32(e.outer_index);
+        write_fname_ref(&mut export_table_w, &mut table, Name::from((e.object_name.0.as_str(), e.object_name.1)));
+        export_table_w.u32(e.object_flags);
+        export_table_w.i64(e.body.len() as i64); // SerialSize
+        export_table_w.i64((total_header_size + export_serial_offsets[i]) as i64); // SerialOffset
+        export_table_w.ubool(false); // bForcedExport
+        export_table_w.ubool(false); // bNotForClient
+        export_table_w.ubool(false); // bNotForServer
+        export_table_w.ubool(false); // bIsInheritedInstance
+        export_table_w.u32(0); // PackageFlags
+        export_table_w.ubool(true); // bNotAlwaysLoadedForEditorGame
+        export_table_w.ubool(e.b_is_asset);
+        // bGeneratePublicHash: real observed VALUE in the corpus
+        // SM_Box.uasset is False for all three exports.
+        export_table_w.ubool(false); // bGeneratePublicHash
+        export_table_w.i32(first_export_dependency[i]);
+        let (a, b, c, d) = dep_counts[i];
+        export_table_w.i32(a);
+        export_table_w.i32(b);
+        export_table_w.i32(c);
+        export_table_w.i32(d);
+    }
+
+    // each export table entry is exactly 96 bytes; verify our field list
+    // actually matches that, since total_header_size above assumed it.
+    assert_eq!(export_table_w.tell(), export_table_size);
+
+    let mut preload_dependency_w = Writer::new();
+    for &idx in &preload_dependency_array {
+        preload_dependency_w.i32(idx);
+    }
+    assert_eq!(preload_dependency_w.tell(), total_header_size - preload_dependency_offset);
+
+    let mut header_bytes = header.into_bytes();
+
+    fn patch_i32(buf: &mut [u8], pos: usize, value: i32) {
+        buf[pos..pos + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    fn patch_i64(buf: &mut [u8], pos: usize, value: i64) {
+        buf[pos..pos + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    patch_i32(&mut header_bytes, total_header_size_pos, total_header_size as i32);
+    patch_i32(&mut header_bytes, name_count_pos, table.names.len() as i32);
+    patch_i32(&mut header_bytes, name_offset_pos, name_offset as i32);
+    patch_i32(&mut header_bytes, soft_object_paths_offset_pos, import_offset as i32);
+    patch_i32(&mut header_bytes, export_count_pos, exports.len() as i32);
+    patch_i32(&mut header_bytes, export_offset_pos, export_offset as i32);
+    patch_i32(&mut header_bytes, import_count_pos, imports.len() as i32);
+    patch_i32(&mut header_bytes, import_offset_pos, import_offset as i32);
+    patch_i32(&mut header_bytes, gen_export_count_pos, exports.len() as i32);
+    patch_i32(&mut header_bytes, gen_name_count_pos, table.names.len() as i32);
+    patch_i32(&mut header_bytes, asset_registry_data_offset_pos, total_header_size as i32); // inert, see docs
+    patch_i64(&mut header_bytes, bulk_data_start_offset_pos, (total_header_size + total_export_body_size) as i64);
+    patch_i32(&mut header_bytes, names_referenced_pos, table.names.len() as i32); // informational; safe upper bound
+    patch_i32(&mut header_bytes, preload_dependency_count_pos, preload_dependency_array.len() as i32);
+    patch_i32(&mut header_bytes, preload_dependency_offset_pos, preload_dependency_offset as i32);
+
+    let mut uasset = Vec::new();
+    uasset.extend_from_slice(&header_bytes);
+    uasset.extend_from_slice(&name_table_w.getvalue());
+    uasset.extend_from_slice(&import_table_w.getvalue());
+    uasset.extend_from_slice(&export_table_w.getvalue());
+    uasset.extend_from_slice(&preload_dependency_w.getvalue());
+    assert_eq!(uasset.len(), total_header_size);
+
+    // ------------------------------------------------------------------
+    // .uexp: concatenated export bodies, then patch each export's inline
+    // bulk-data Offset fields (section 8 case (a): Offset =
+    // TotalHeaderSize + uexp-relative payload start), then append the
+    // trailing PACKAGE_FILE_TAG sentinel (section 5).
+    // ------------------------------------------------------------------
+    let mut uexp = Vec::new();
+    for (i, e) in exports.iter_mut().enumerate() {
+        let export_start_in_uexp = export_serial_offsets[i];
+        for &(offset_field_pos, payload_pos) in &e.patches {
+            let absolute_offset = (total_header_size + export_start_in_uexp + payload_pos) as i64;
+            e.body[offset_field_pos..offset_field_pos + 8].copy_from_slice(&absolute_offset.to_le_bytes());
+        }
+        uexp.extend_from_slice(&e.body);
+    }
+    uexp.extend_from_slice(&PACKAGE_FILE_TAG.to_le_bytes());
+
+    (uasset, uexp)
+}

@@ -1,0 +1,344 @@
+//! StaticMesh export writer -- inverse of sections 6, 7, 10, 11, 12.
+//!
+//! SCOPE DECISIONS (all via legitimate, documented strip-flag / feature-toggle
+//! mechanisms the real engine also uses for platforms that don't need certain
+//! data -- not hacks):
+//!   - Nanite: written as the standard "disabled" block (all-zero fields),
+//!     exactly matching a non-Nanite mesh (SM_Box has Nanite off).
+//!   - Lumen card representation data: STRIPPED via
+//!     ClassStripFlags |= CardRepresentationDataStripFlag(2).
+//!   - Mesh distance fields: STRIPPED via
+//!     ClassStripFlags |= DistanceFieldDataStripFlag(1).
+//!   - Ray tracing geometry: STRIPPED via
+//!     ClassStripFlags |= CDSF_RayTracingResources(8) -- matches SM_Box's own
+//!     cooked ClassStripFlags exactly (this bit was already set there).
+//!   - Editor-only data (wireframe index buffer, etc.): STRIPPED via
+//!     GlobalStripFlags |= Editor(1).
+//!   - Area-weighted section samplers (GPU uniform-triangle-sampling data):
+//!     left empty (Prob=[], Alias=[], TotalWeight=0).
+//!   - DepthOnlyIndexBuffer reuses the main IndexBuffer verbatim rather than
+//!     computing the (optional) position-only-dedup optimization -- always
+//!     valid, just not maximally memory-efficient.
+
+use crate::core::{
+    encode_box_sphere_bounds, write_bool_property, write_box_sphere_bounds_property, write_fname_ref,
+    write_float_property, write_name_property, write_none_terminator, write_struct_property, write_tag_header,
+    NameTable, TagExtra, Writer,
+};
+use crate::mesh::RenderMesh;
+
+const CDSF_REVERSED_INDEX_BUFFER: u8 = 4;
+const CDSF_RAY_TRACING_RESOURCES: u8 = 8;
+const CARD_REPRESENTATION_DATA_STRIP_FLAG: u8 = 2;
+const DISTANCE_FIELD_DATA_STRIP_FLAG: u8 = 1;
+
+fn write_strip_flags(w: &mut Writer, global_flags: u8, class_flags: u8) {
+    w.u8(global_flags);
+    w.u8(class_flags);
+}
+
+/// Bulk-serialized TArray (section 0): int32 ElementSize, int32 Count, raw bytes.
+fn write_bulk_array(w: &mut Writer, element_size: i32, raw: &[u8]) {
+    let count = if element_size != 0 { raw.len() as i32 / element_size } else { 0 };
+    w.i32(element_size);
+    w.i32(count);
+    w.bytes(raw);
+}
+
+/// `StaticMaterials` UPROPERTY: ArrayProperty<StructProperty=StaticMaterial>.
+/// Uses the "shared tag, then N nested tagged-property lists" encoding
+/// verified against the real SM_Box blob.
+fn write_static_materials_tagged(w: &mut Writer, table: &mut NameTable, material_names: &[String]) {
+    let count = material_names.len();
+
+    let mut elements = Writer::new();
+    for name in material_names {
+        let mut one = Writer::new();
+        // MaterialInterface = null (FPackageIndex, ObjectProperty)
+        write_tag_header(&mut one, table, "MaterialInterface", "ObjectProperty", 4, 0, TagExtra::default());
+        one.u8(0); // HasPropertyGuid
+        one.i32(0); // null
+        write_name_property(&mut one, table, "MaterialSlotName", name.as_str());
+        write_name_property(&mut one, table, "ImportedMaterialSlotName", name.as_str());
+        // UVChannelData (StructProperty = MeshUVChannelInfo, nested tagged list)
+        let mut uv = Writer::new();
+        write_bool_property(&mut uv, table, "bInitialized", true);
+        write_bool_property(&mut uv, table, "bOverrideDensities", false);
+        for i in 0..4 {
+            let mut fw = Writer::new();
+            fw.f32(if i == 0 { 100.0 } else { 0.0 });
+            write_tag_header(&mut uv, table, "LocalUVDensities", "FloatProperty", 4, i as i32, TagExtra::default());
+            uv.u8(0);
+            uv.bytes(&fw.getvalue());
+        }
+        write_none_terminator(&mut uv, table);
+        write_struct_property(&mut one, table, "UVChannelData", "MeshUVChannelInfo", &uv.getvalue());
+        write_none_terminator(&mut one, table);
+        elements.bytes(&one.getvalue());
+    }
+
+    // Shared array-of-struct tag (section 6's "one shared struct tag, then
+    // N nested tagged-property lists" optimization).
+    let mut value = Writer::new();
+    value.i32(count as i32);
+    write_tag_header(
+        &mut value,
+        table,
+        "StaticMaterials",
+        "StructProperty",
+        elements.tell() as i32,
+        0,
+        TagExtra { struct_name: Some("StaticMaterial"), ..Default::default() },
+    );
+    value.u8(0); // shared tag's own HasPropertyGuid
+    value.bytes(&elements.getvalue());
+
+    write_tag_header(
+        w,
+        table,
+        "StaticMaterials",
+        "ArrayProperty",
+        value.tell() as i32,
+        0,
+        TagExtra { inner_type: Some("StructProperty"), ..Default::default() },
+    );
+    w.u8(0);
+    w.bytes(&value.getvalue());
+}
+
+fn write_index_buffer(w: &mut Writer, indices: &[u32], b32bit_forced: Option<bool>) {
+    let max_index = indices.iter().copied().max().unwrap_or(0);
+    let b32 = b32bit_forced.unwrap_or(max_index >= 0xFFFF);
+    w.ubool(b32);
+    let raw: Vec<u8> = if b32 {
+        indices.iter().flat_map(|&i| i.to_le_bytes()).collect()
+    } else {
+        indices.iter().flat_map(|&i| (i as u16).to_le_bytes()).collect()
+    };
+    write_bulk_array(w, 1, &raw);
+    w.ubool(false); // bShouldExpandTo32Bit
+}
+
+fn reversed_triangles(indices: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(indices.len());
+    for tri in indices.chunks(3) {
+        out.extend_from_slice(&[tri[2], tri[1], tri[0]]);
+    }
+    out
+}
+
+fn write_weighted_sampler_empty(w: &mut Writer) {
+    w.i32(0); // Prob
+    w.i32(0); // Alias
+    w.f32(0.0); // TotalWeight
+}
+
+/// IEEE-754 binary16 encode, matching Python's `struct.pack("<e", x)`
+/// (round-to-nearest-even, the IEEE default and what CPython's
+/// `_PyFloat_Pack2` implements).
+fn f16_bits(f: f32) -> u16 {
+    half::f16::from_f32(f).to_bits()
+}
+
+fn write_lod_resources(w: &mut Writer, mesh: &RenderMesh) {
+    let sections = &mesh.sections;
+    let positions = &mesh.positions;
+    let tangents = &mesh.tangents;
+    let uvs = &mesh.uvs;
+    let indices = &mesh.indices;
+    let num_tex_coords: u32 = 1;
+
+    let class_strip_flags = CDSF_RAY_TRACING_RESOURCES;
+    write_strip_flags(w, 1, class_strip_flags);
+
+    w.i32(sections.len() as i32);
+    for sec in sections {
+        w.i32(sec.material_index as i32);
+        w.u32(sec.first_index as u32);
+        w.u32(sec.num_triangles as u32);
+        w.u32(sec.min_vertex_index as u32);
+        w.u32(sec.max_vertex_index as u32);
+        w.ubool(true); // bEnableCollision
+        w.ubool(true); // bCastShadow
+        w.ubool(false); // bForceOpaque
+        w.ubool(true); // bVisibleInRayTracing
+        w.ubool(true); // bAffectDistanceFieldLighting
+    }
+
+    w.f32(0.0); // MaxDeviation
+    w.ubool(false); // bIsLODCookedOut
+    w.ubool(true); // bInlined
+
+    // SerializeBuffers (bInlined=True path)
+    write_strip_flags(w, 1, class_strip_flags);
+
+    // PositionVertexBuffer
+    w.i32(12); // Stride
+    w.u32(positions.len() as u32);
+    let pos_raw: Vec<u8> = positions
+        .iter()
+        .flat_map(|p| {
+            let mut b = Vec::with_capacity(12);
+            b.extend_from_slice(&(p[0] as f32).to_le_bytes());
+            b.extend_from_slice(&(p[1] as f32).to_le_bytes());
+            b.extend_from_slice(&(p[2] as f32).to_le_bytes());
+            b
+        })
+        .collect();
+    write_bulk_array(w, 12, &pos_raw);
+
+    // StaticMeshVertexBuffer
+    write_strip_flags(w, 1, 0);
+    w.u32(num_tex_coords);
+    w.u32(positions.len() as u32);
+    w.ubool(false); // bUseFullPrecisionUVs
+    w.ubool(false); // bUseHighPrecisionTangentBasis
+    let tan_raw: Vec<u8> = tangents
+        .iter()
+        .flat_map(|t| {
+            [
+                t.tangent_x.0 as u8,
+                t.tangent_x.1 as u8,
+                t.tangent_x.2 as u8,
+                t.tangent_x.3 as u8,
+                t.tangent_z.0 as u8,
+                t.tangent_z.1 as u8,
+                t.tangent_z.2 as u8,
+                t.tangent_z.3 as u8,
+            ]
+        })
+        .collect();
+    write_bulk_array(w, 8, &tan_raw);
+    let mut uv_raw = Vec::new();
+    for uv_channels in uvs {
+        for &[u, v] in uv_channels {
+            uv_raw.extend_from_slice(&f16_bits(u as f32).to_le_bytes());
+            uv_raw.extend_from_slice(&f16_bits(v as f32).to_le_bytes());
+        }
+    }
+    write_bulk_array(w, 4, &uv_raw);
+
+    // ColorVertexBuffer (no vertex colors)
+    write_strip_flags(w, 1, 0);
+    w.i32(0); // Stride
+    w.u32(0); // NumVertices
+
+    // IndexBuffer
+    write_index_buffer(w, indices, None);
+    // ReversedIndexBuffer (present: class_strip_flags doesn't set bit 4)
+    if class_strip_flags & CDSF_REVERSED_INDEX_BUFFER == 0 {
+        write_index_buffer(w, &reversed_triangles(indices), None);
+    }
+    // DepthOnlyIndexBuffer (reuse main index buffer verbatim -- see docs)
+    write_index_buffer(w, indices, None);
+    if class_strip_flags & CDSF_REVERSED_INDEX_BUFFER == 0 {
+        write_index_buffer(w, &reversed_triangles(indices), None);
+    }
+    // WireframeIndexBuffer: absent (GlobalStripFlags has Editor bit set)
+    // RayTracingGeometry.RawData: absent (class_strip_flags has bit 8 set)
+
+    for _ in sections {
+        write_weighted_sampler_empty(w);
+    }
+    write_weighted_sampler_empty(w);
+
+    // FStaticMeshBuffersSize (informational only -- recomputed, not load-critical)
+    let total_size = pos_raw.len() + tan_raw.len() + uv_raw.len() + 2 * indices.len() * 2;
+    let depth_only_size = indices.len() * 2;
+    let reversed_size = 2 * indices.len() * 2;
+    w.u32(total_size as u32);
+    w.u32(depth_only_size as u32);
+    w.u32(reversed_size as u32);
+}
+
+fn write_nanite_disabled(w: &mut Writer) {
+    write_strip_flags(w, 1, 0);
+    w.u32(0); // ResourceFlags
+    // StreamablePages: empty FBulkData, Flags=0 -> Offset is inert (no payload read regardless)
+    w.u32(0); // Flags
+    w.i32(0); // ElementCount
+    w.i32(0); // SizeOnDisk
+    w.i64(0); // Offset
+    w.i32(0); // RootData
+    w.i32(0); // PageStreamingStates
+    w.i32(0); // HierarchyNodes
+    w.i32(0); // HierarchyRootOffsets
+    w.i32(0); // PageDependencies
+    w.i32(0); // ImposterAtlas
+    w.u32(0); // NumRootPages
+    w.i32(0); // PositionPrecision
+    w.u32(0); // NumInputTriangles
+    w.u32(0); // NumInputVertices
+    w.u16(0); // NumInputMeshes (uint16!)
+    w.u16(0); // NumInputTexCoords (uint16!)
+    w.u32(0); // NumClusters
+}
+
+pub fn write_static_mesh(
+    table: &mut NameTable,
+    mesh: &RenderMesh,
+    body_setup_export_index: i32,
+    nav_collision_export_index: i32,
+    lighting_guid_hex32: &str,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+
+    // --- tagged properties ---
+    write_static_materials_tagged(&mut w, table, &mesh.material_names);
+    write_float_property(&mut w, table, "LightmapUVDensity", 0.0);
+    write_bool_property(&mut w, table, "bGenerateMeshDistanceField", false);
+    let b = &mesh.bounds;
+    write_box_sphere_bounds_property(&mut w, table, "ExtendedBounds", b.origin, b.box_extent, b.sphere_radius);
+    write_none_terminator(&mut w, table);
+
+    w.ubool(false); // hidden lazy-object-guid presence bool (section 7)
+
+    write_strip_flags(&mut w, 1, 0); // top-level UStaticMesh::Serialize StripFlags
+    w.ubool(true); // bCooked
+    w.i32(body_setup_export_index + 1); // FPackageIndex (N>0 -> export index N-1)
+    w.i32(nav_collision_export_index + 1);
+    w.fguid(lighting_guid_hex32);
+    w.i32(0); // Sockets.Num
+
+    // FStaticMeshRenderData
+    w.i32(1); // LODResources.Num
+    write_lod_resources(&mut w, mesh);
+    w.u8(1); // NumInlinedLODs
+    write_nanite_disabled(&mut w);
+
+    // CardRepresentationData: stripped (see docs)
+    write_strip_flags(&mut w, 1, CARD_REPRESENTATION_DATA_STRIP_FLAG);
+    // DistanceField: stripped (see docs)
+    write_strip_flags(&mut w, 1, DISTANCE_FIELD_DATA_STRIP_FLAG);
+
+    w.bytes(&encode_box_sphere_bounds(b.origin, b.box_extent, b.sphere_radius));
+    w.ubool(true); // bLODsShareStaticLighting
+
+    // ScreenSize[8] -- FPerPlatformFloat: bool bCooked(=true) + float Value
+    let screen_sizes = [2.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for s in screen_sizes {
+        w.ubool(true);
+        w.f32(s);
+    }
+
+    w.ubool(false); // bHasSpeedTreeWind
+
+    // Native (untagged) runtime-copy of StaticMaterials -- operator<<(FArchive&,FStaticMaterial&)
+    // (StaticMesh.cpp:3125-3143): MaterialInterface, MaterialSlotName,
+    // [ImportedMaterialSlotName only with editor-only data -- absent for a
+    // distribution cook], UVChannelData (native FMeshUVChannelInfo).
+    let material_names = &mesh.material_names;
+    w.i32(material_names.len() as i32);
+    for name in material_names {
+        w.i32(0); // MaterialInterface (FPackageIndex, null)
+        write_fname_ref(&mut w, table, name.as_str()); // MaterialSlotName
+        w.ubool(true); // bInitialized
+        w.ubool(false); // bOverrideDensities
+        w.f32(100.0);
+        w.f32(0.0);
+        w.f32(0.0);
+        w.f32(0.0); // LocalUVDensities
+    }
+
+    w.into_bytes()
+}
