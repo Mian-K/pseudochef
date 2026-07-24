@@ -255,21 +255,6 @@ fn main() {
             .object_name = fname;
     }
 
-    // Print all exports
-    for i in 0..umap.asset_data.exports.len() as i32 {
-        let export = umap
-            .get_export(unreal_asset::types::PackageIndex::new(i + 1))
-            .unwrap();
-        let object_name = &export.get_base_export().object_name;
-        //println!("{}: {}", i + 1, fname_to_str(object_name));
-        let props = export.get_normal_export().unwrap().properties.clone();
-        for prop in props {
-            if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
-                //println!("  {}: {}", obj_prop.value.index, obj_prop.name.get_owned_content());
-            }
-        }
-    }
-
     // TODO generate obj files and write them to the umap and the pak
 
     let mut final_umap = std::io::Cursor::new(vec![]);
@@ -283,13 +268,4 @@ fn main() {
     pak.write_file("Mods/Maps/slop.uexp", true, final_uexp.get_ref())
         .expect("failed to write uexp to pak");
     pak.write_index().unwrap();
-}
-
-fn fname_to_str(fname: &unreal_asset::types::FName) -> String {
-    let n = fname.get_number();
-    if n > 0 {
-        format!("{}_{}", fname.get_owned_content(), n - 1)
-    } else {
-        format!("{}", fname.get_owned_content())
-    }
 }
