@@ -142,12 +142,76 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
         }
     }
 
-    pseudocooker::MeshInput {
+    let mut mesh = pseudocooker::MeshInput {
         positions,
         uvs: Vec::new(),
         normals: Vec::new(),
         faces,
         material_names: vec![],
+    };
+    // Adjacent faces of the brush agree on where a shared edge's vertices
+    // should be (same edge length, same spacing, so the same subdivision
+    // points), but each face reconstructs its own vertex positions from its
+    // own 2D projection, so shared vertices come out merely float-close
+    // rather than bit-identical. Weld them so the mesh is actually
+    // watertight instead of having micro-cracks along every brush edge.
+    weld_vertices(&mut mesh, WELD_EPSILON);
+    mesh
+}
+
+// World-space distance below which two vertices are considered the same
+// point; matches the tolerance already used to dedupe brush-corner
+// candidates above.
+const WELD_EPSILON: f64 = 1e-2;
+
+/// Merges mesh vertices that are within `epsilon` of each other in place,
+/// remapping face corners to point at the surviving vertex.
+fn weld_vertices(mesh: &mut pseudocooker::MeshInput, epsilon: f64) {
+    let cell_size = epsilon;
+    let cell_of = |p: [f64; 3]| -> (i64, i64, i64) {
+        (
+            (p[0] / cell_size).floor() as i64,
+            (p[1] / cell_size).floor() as i64,
+            (p[2] / cell_size).floor() as i64,
+        )
+    };
+
+    let mut welded_positions: Vec<[f64; 3]> = vec![];
+    let mut buckets: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    let mut remap: Vec<usize> = Vec::with_capacity(mesh.positions.len());
+
+    for &p in &mesh.positions {
+        let (cx, cy, cz) = cell_of(p);
+        let mut existing = None;
+        'search: for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(candidates) = buckets.get(&(cx + dx, cy + dy, cz + dz)) else { continue };
+                    for &j in candidates {
+                        let q = welded_positions[j];
+                        let d2 = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2);
+                        if d2 < epsilon * epsilon {
+                            existing = Some(j);
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+        let index = existing.unwrap_or_else(|| {
+            let index = welded_positions.len();
+            welded_positions.push(p);
+            buckets.entry((cx, cy, cz)).or_default().push(index);
+            index
+        });
+        remap.push(index);
+    }
+
+    mesh.positions = welded_positions;
+    for face in &mut mesh.faces {
+        for corner in &mut face.corners {
+            corner.position = remap[corner.position];
+        }
     }
 }
 
@@ -509,5 +573,61 @@ mod tests {
         // A generous bound: the longest edge (e.g. a lattice-row diagonal)
         // shouldn't be more than double the requested spacing.
         assert!(max_edge_len <= spacing * 2.0, "found a sliver-length edge: {max_edge_len}");
+    }
+
+    #[test]
+    fn weld_vertices_merges_close_points_and_remaps_corners() {
+        let mut mesh = pseudocooker::MeshInput {
+            // Positions 0 and 2 are float-close but not identical, as two
+            // faces' independently-reconstructed copies of a shared corner
+            // would be; position 1 is far away and should be untouched.
+            positions: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [1e-4, 1e-4, 0.0]],
+            uvs: Vec::new(),
+            normals: Vec::new(),
+            faces: vec![pseudocooker::Face {
+                material_index: 0,
+                corners: vec![
+                    pseudocooker::Corner::new(0),
+                    pseudocooker::Corner::new(1),
+                    pseudocooker::Corner::new(2),
+                ],
+            }],
+            material_names: vec![],
+        };
+
+        weld_vertices(&mut mesh, WELD_EPSILON);
+
+        assert_eq!(mesh.positions.len(), 2);
+        let corner_positions: Vec<usize> = mesh.faces[0].corners.iter().map(|c| c.position).collect();
+        assert_eq!(corner_positions[0], corner_positions[2], "the two close vertices should have welded to the same index");
+        assert_ne!(corner_positions[0], corner_positions[1]);
+    }
+
+    #[test]
+    fn convert_to_mesh_welds_shared_vertices_between_adjacent_faces() {
+        // The same box brush as the orthogonal-box test, but checked for
+        // near-duplicate (but not identical) positions: before welding,
+        // adjacent faces reconstructed their shared edge's vertices
+        // independently and landed a few float32-ULPs apart.
+        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let planes = vec![
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
+            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
+            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+        ];
+        let brush = Brush::new(planes);
+        let mesh = convert_to_mesh(&brush, 3.0);
+
+        for i in 0..mesh.positions.len() {
+            for j in (i + 1)..mesh.positions.len() {
+                let a = mesh.positions[i];
+                let b = mesh.positions[j];
+                let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+                assert!(d >= WELD_EPSILON, "found an unwelded near-duplicate vertex pair at distance {d:e}");
+            }
+        }
     }
 }
