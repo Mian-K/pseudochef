@@ -4,6 +4,10 @@ use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
 
 mod brush_to_mesh;
+// Not called from the pipeline yet; used ad hoc (e.g. from a debugger or a
+// scratch `main`) to dump a `MeshInput` for visual inspection in Blender.
+#[allow(dead_code)]
+mod obj_export;
 use brush_to_mesh::convert_to_mesh;
 
 const MISE_UMAP: &[u8] = include_bytes!("mise.umap");
