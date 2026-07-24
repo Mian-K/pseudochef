@@ -12,6 +12,10 @@ use brush_to_mesh::convert_to_mesh;
 
 const MISE_UMAP: &[u8] = include_bytes!("mise.umap");
 const MISE_UEXP: &[u8] = include_bytes!("mise.uexp");
+// World-space (map-unit) spacing between generated interior face vertices;
+// see `brush_to_mesh::convert_to_mesh`. Smaller values give smoother
+// per-vertex lighting at the cost of more geometry.
+const FACE_VERTEX_SPACING: f32 = 64.0;
 
 fn default_opts() -> pseudocooker::CookOptions {
     pseudocooker::CookOptions {
@@ -39,7 +43,7 @@ fn main() {
 
     for (i, ent) in ast.0.iter().enumerate() {
         for brush in &ent.brushes.0 {
-            let mesh = convert_to_mesh(&brush);
+            let mesh = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
             let name = format!("tb{}", i);
             let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
             pak.write_file(

@@ -1,5 +1,7 @@
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Vec3};
 use itertools::Itertools;
+use spade::{DelaunayTriangulation, Point2, Triangulation};
+use std::collections::HashMap;
 
 fn vec3(p: shalrath::repr::Point) -> Vec3 {
     Vec3::new(p.x, p.y, p.z)
@@ -26,7 +28,12 @@ fn mirror_xz(brush: &shalrath::repr::Brush) -> shalrath::repr::Brush {
     }
     shalrath::repr::Brush::new(planes)
 }
-pub fn convert_to_mesh(brush: &shalrath::repr::Brush) -> pseudocooker::MeshInput {
+/// `target_vertex_spacing` is the approximate world-space distance between
+/// generated interior vertices on each face; smaller values give a denser,
+/// more uniform mesh (useful for even per-vertex lighting). A value <= 0.0
+/// disables interior subdivision, leaving each face as just its boundary
+/// vertices (still Delaunay-triangulated, unlike the old vertex-fan).
+pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32) -> pseudocooker::MeshInput {
     // TrenchBroom uses a right-handed coordinate system with +z pointing up.
     // Unreal uses a left-handed coordinate system with +z pointing up.
     // So, we mirror across the xz-plane when converting.
@@ -118,32 +125,19 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush) -> pseudocooker::MeshInput
     let mut faces = vec![];
     for (normal, face_vertices) in normals.iter().zip(vertices.iter()) {
         let base = positions.len();
-        let quat = Quat::from_rotation_arc(normal.clone(), Vec3::Z);
-        let mut polar_angles = vec![];
-        for (i, vertex) in face_vertices.iter().enumerate() {
-            positions.push([vertex.x as f64, vertex.y as f64, vertex.z as f64]);
-            let rv = quat * vertex;
-            let theta = ordered_float::OrderedFloat(rv.y.atan2(rv.x));
-            polar_angles.push((theta, i));
-        }
-        polar_angles.sort();
-        let mut tris = vec![];
-        for i in 1..polar_angles.len() - 1 {
-            let a = polar_angles[0].1;
-            let b = polar_angles[i].1;
-            let c = polar_angles[i + 1].1;
+        let (points, triangles) = triangulate_face(*normal, face_vertices, target_vertex_spacing);
+        positions.extend(points.iter().map(|p| [p.x as f64, p.y as f64, p.z as f64]));
+        for [a, b, c] in triangles {
             // TODO unhardcode material_index; would need to pass in whole entity, not just brush
-            let f = pseudocooker::Face {
+            faces.push(pseudocooker::Face {
                 material_index: 0,
                 corners: vec![
                     pseudocooker::Corner::new(base + a),
                     pseudocooker::Corner::new(base + b),
                     pseudocooker::Corner::new(base + c),
                 ],
-            };
-            tris.push(f);
+            });
         }
-        faces.extend(tris);
     }
 
     pseudocooker::MeshInput {
@@ -153,7 +147,139 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush) -> pseudocooker::MeshInput
         faces,
         material_names: vec![],
     }
-    // TODO break up each face for more even vertex lighting
+}
+
+/// Triangulates one convex, planar face (given its unordered boundary
+/// vertices and outward normal) so that the resulting vertices are roughly
+/// uniformly distributed, rather than fanned out from a single corner.
+///
+/// The face is convex by construction (see the plane-intersection loop
+/// above), which means a plain Delaunay triangulation of its boundary plus
+/// some interior sample points already spans exactly the face's polygon --
+/// unlike an arbitrary polygon, no constrained edges are needed to keep the
+/// triangulation from crossing the boundary.
+///
+/// Returns the (deduplicated) points used -- boundary vertices first, in
+/// their original order, followed by any generated interior points -- and a
+/// list of triangles as indices into that point list.
+fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Vec<Vec3>, Vec<[usize; 3]>) {
+    if boundary.len() < 3 {
+        return (boundary.to_vec(), vec![]);
+    }
+
+    let n = normal.normalize();
+    // Build an orthonormal (u, v) basis for the face's plane such that
+    // u.cross(v) == n: a counterclockwise triangle in (u, v) coordinates
+    // then has outward normal n, matching the winding the rest of the
+    // pipeline expects.
+    let reference = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let u = n.cross(reference).normalize();
+    let v = n.cross(u);
+    let origin = boundary[0];
+    let project = |p: Vec3| -> (f32, f32) {
+        let d = p - origin;
+        (d.dot(u), d.dot(v))
+    };
+    let unproject = |(x, y): (f32, f32)| -> Vec3 { origin + u * x + v * y };
+
+    let mut boundary_2d: Vec<(f32, f32)> = boundary.iter().map(|&p| project(p)).collect();
+    let centroid = {
+        let sum = boundary_2d.iter().fold((0.0, 0.0), |acc, p| (acc.0 + p.0, acc.1 + p.1));
+        (sum.0 / boundary_2d.len() as f32, sum.1 / boundary_2d.len() as f32)
+    };
+    boundary_2d.sort_by(|a, b| {
+        let ta = (a.1 - centroid.1).atan2(a.0 - centroid.0);
+        let tb = (b.1 - centroid.1).atan2(b.0 - centroid.0);
+        ta.partial_cmp(&tb).unwrap()
+    });
+
+    let mut points_2d = boundary_2d.clone();
+    if target_spacing > 0.0 {
+        points_2d.extend(sample_interior_points(&boundary_2d, target_spacing));
+    }
+
+    let mut triangulation: DelaunayTriangulation<Point2<f64>> = DelaunayTriangulation::new();
+    let mut index_of: HashMap<(u64, u64), usize> = HashMap::new();
+    for (i, &(x, y)) in points_2d.iter().enumerate() {
+        let (x64, y64) = (x as f64, y as f64);
+        triangulation
+            .insert(Point2::new(x64, y64))
+            .expect("face sample points are finite and deduplicated by construction");
+        index_of.insert((x64.to_bits(), y64.to_bits()), i);
+    }
+
+    let points: Vec<Vec3> = points_2d.iter().map(|&p| unproject(p)).collect();
+    let triangles: Vec<[usize; 3]> = triangulation
+        .inner_faces()
+        .map(|face| {
+            let [a, b, c] = face
+                .positions()
+                .map(|p| index_of[&(p.x.to_bits(), p.y.to_bits())]);
+            // Delaunay triangulation is agnostic to our winding convention;
+            // flip back to outward-facing if this triangle came out reversed.
+            if (points[b] - points[a]).cross(points[c] - points[a]).dot(n) < 0.0 {
+                [a, c, b]
+            } else {
+                [a, b, c]
+            }
+        })
+        .collect();
+
+    (points, triangles)
+}
+
+/// Fills the interior of a counterclockwise-ordered convex polygon with a
+/// triangular lattice of points spaced roughly `spacing` apart, staying at
+/// least half a spacing away from the boundary so the Delaunay
+/// triangulation doesn't produce slivers between interior and boundary
+/// vertices.
+fn sample_interior_points(boundary_ccw: &[(f32, f32)], spacing: f32) -> Vec<(f32, f32)> {
+    let margin = spacing * 0.5;
+    let min_x = boundary_ccw.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let max_x = boundary_ccw.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+    let min_y = boundary_ccw.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+    let max_y = boundary_ccw.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+
+    let row_height = spacing * 0.75_f32.sqrt(); // sqrt(3)/2, for a triangular lattice
+    let mut points = vec![];
+    let mut row = 0i32;
+    let mut y = min_y;
+    while y <= max_y {
+        let x_offset = if row % 2 == 0 { 0.0 } else { spacing * 0.5 };
+        let mut x = min_x + x_offset;
+        while x <= max_x {
+            if inside_with_margin(boundary_ccw, (x, y), margin) {
+                points.push((x, y));
+            }
+            x += spacing;
+        }
+        row += 1;
+        y += row_height;
+    }
+    points
+}
+
+/// True if `p` is inside `boundary_ccw` (a counterclockwise-ordered convex
+/// polygon) and at least `margin` away from every edge.
+fn inside_with_margin(boundary_ccw: &[(f32, f32)], p: (f32, f32), margin: f32) -> bool {
+    let n = boundary_ccw.len();
+    for i in 0..n {
+        let a = boundary_ccw[i];
+        let b = boundary_ccw[(i + 1) % n];
+        let edge = (b.0 - a.0, b.1 - a.1);
+        let edge_len = (edge.0 * edge.0 + edge.1 * edge.1).sqrt();
+        if edge_len < 1e-9 {
+            continue;
+        }
+        let to_point = (p.0 - a.0, p.1 - a.1);
+        // Positive for points left of the edge, i.e. the interior side of a
+        // counterclockwise polygon.
+        let signed_distance = (edge.0 * to_point.1 - edge.1 * to_point.0) / edge_len;
+        if signed_distance < margin {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -195,9 +321,10 @@ mod tests {
             plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
         ];
         let brush = Brush::new(planes);
-        let mesh = convert_to_mesh(&brush);
+        let mesh = convert_to_mesh(&brush, 0.0);
 
-        // 6 quad faces, fan-triangulated into 2 triangles each.
+        // 6 quad faces, triangulated into 2 triangles each (no interior
+        // subdivision requested, so this is just the boundary triangulation).
         assert_eq!(mesh.faces.len(), 12);
         for p in &mesh.positions {
             assert!(p.iter().all(|c| c.is_finite()));
@@ -229,12 +356,77 @@ mod tests {
             plane_outward(b, b2, c2, centroid),  // hypotenuse side face along BC
         ];
         let brush = Brush::new(planes);
-        let mesh = convert_to_mesh(&brush);
+        let mesh = convert_to_mesh(&brush, 0.0);
 
         // 2 triangular caps (1 tri each) + 3 rectangular sides (2 tris each).
         assert_eq!(mesh.faces.len(), 8);
         for p in &mesh.positions {
             assert!(p.iter().all(|c| c.is_finite()));
+        }
+    }
+
+    #[test]
+    fn convert_to_mesh_subdivides_faces_with_small_spacing() {
+        // Same box as above, but with a spacing small enough that each
+        // 10x10 face should get extra interior vertices.
+        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let planes = vec![
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
+            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
+            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+        ];
+        let brush = Brush::new(planes);
+
+        let coarse = convert_to_mesh(&brush, 0.0);
+        let fine = convert_to_mesh(&brush, 3.0);
+
+        assert!(fine.positions.len() > coarse.positions.len());
+        assert!(fine.faces.len() > coarse.faces.len());
+        for p in &fine.positions {
+            assert!(p.iter().all(|c| c.is_finite()));
+        }
+    }
+
+    #[test]
+    fn triangulate_face_boundary_only_matches_fan_triangle_count() {
+        // A convex pentagon with no interior subdivision requested: point
+        // count and triangle count should match a plain fan/ear-clip of the
+        // boundary (n vertices -> n-2 triangles), just via Delaunay instead.
+        let normal = Vec3::Z;
+        let boundary = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::new(5.0, 3.0, 0.0),
+            Vec3::new(2.0, 5.0, 0.0),
+            Vec3::new(-1.0, 3.0, 0.0),
+        ];
+        let (points, triangles) = triangulate_face(normal, &boundary, 0.0);
+
+        assert_eq!(points.len(), boundary.len());
+        assert_eq!(triangles.len(), boundary.len() - 2);
+    }
+
+    #[test]
+    fn triangulate_face_adds_interior_points_and_stays_outward_wound() {
+        let normal = Vec3::Z;
+        let boundary = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(10.0, 10.0, 0.0),
+            Vec3::new(0.0, 10.0, 0.0),
+        ];
+        let (points, triangles) = triangulate_face(normal, &boundary, 2.0);
+
+        // A 10x10 square with 2-unit spacing should pick up interior points.
+        assert!(points.len() > boundary.len());
+        assert!(!triangles.is_empty());
+
+        for [a, b, c] in triangles {
+            let tri_normal = (points[b] - points[a]).cross(points[c] - points[a]);
+            assert!(tri_normal.dot(normal) > 0.0, "triangle wound inward relative to face normal");
         }
     }
 }

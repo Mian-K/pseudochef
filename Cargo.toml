@@ -11,3 +11,4 @@ ordered-float = "3.9.2"  # should match version used by unreal_asset
 pseudocooker = { path = "pseudocooker" }
 glam = "0.33.2"
 itertools = "0.15.0"
+spade = "2.15.1"
