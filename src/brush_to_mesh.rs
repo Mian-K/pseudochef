@@ -122,6 +122,8 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
 
         for &i in &[*i0, *i1, *i2] {
             let face_vertices = &mut vertices[i];
+            // If more than 3 planes intersect at the same vertex, there will be duplicates.
+            // This is unlikely with brushes but we account for it anyway.
             let is_duplicate = face_vertices
                 .iter()
                 .any(|v: &Vec3| v.distance(intersection) < VERTEX_EPSILON);
