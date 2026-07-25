@@ -1,7 +1,6 @@
 use shalrath::parser::repr::parse_map;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
-use std::ops::Mul;
 use std::time::{Duration, Instant};
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
@@ -15,8 +14,21 @@ use brush_to_mesh::convert_to_mesh;
 #[allow(dead_code)]
 mod obj_export;
 
-const MISE_UMAP: &[u8] = include_bytes!("mise.umap");
-const MISE_UEXP: &[u8] = include_bytes!("mise.uexp");
+const MISE_FILES: &[(&str, &[u8])] = &[
+    ("BP_ExaminableGrave.uasset", include_bytes!("mise/BP_ExaminableGrave.uasset")),
+    ("BP_ExaminableGrave.uexp", include_bytes!("mise/BP_ExaminableGrave.uexp")),
+    ("BP_Hazard.uasset", include_bytes!("mise/BP_Hazard.uasset")),
+    ("BP_Hazard.uexp", include_bytes!("mise/BP_Hazard.uexp")),
+    ("M_HazMat.uasset", include_bytes!("mise/M_HazMat.uasset")),
+    ("M_HazMat.uexp", include_bytes!("mise/M_HazMat.uexp")),
+    ("SM_ExampleBox.uasset", include_bytes!("mise/SM_ExampleBox.uasset")),
+    ("SM_ExampleBox.uexp", include_bytes!("mise/SM_ExampleBox.uexp")),
+    ("SM_ExampleBox.ubulk", include_bytes!("mise/SM_ExampleBox.ubulk")),
+];
+
+const MISE_UMAP: &[u8] = include_bytes!("mise/mise.umap");
+const MISE_UEXP: &[u8] = include_bytes!("mise/mise.uexp");
+
 // World-space (map-unit) spacing between generated interior face vertices;
 // see `brush_to_mesh::convert_to_mesh`. Smaller values give smoother
 // per-vertex lighting at the cost of more geometry.
@@ -200,7 +212,7 @@ fn process_brush<C: Read + Seek, W: Write + Seek>(
     println!("cooked {}", name);
 
     let new_import_idx = {
-        let idx1 = find_import(umap, "Package", "/Game/Mods/Maps/MyLevel/SM_ExampleBox").unwrap();
+        let idx1 = find_import(umap, "Package", "/Game/Mods/Maps/mise/SM_ExampleBox").unwrap();
         let idx2 = find_import(umap, "StaticMesh", "SM_ExampleBox").unwrap();
         let mut import1c = umap.get_import(idx1).unwrap().clone();
         import1c.object_name = umap.add_fname(&format!("/Game/Mods/Maps/slop/{}", name));
@@ -309,10 +321,19 @@ fn main() {
     umap.write_data(&mut final_umap, Some(&mut final_uexp))
         .expect("failed to serialize umap");
 
+    std::fs::write("slop.umap", final_umap.get_ref()).unwrap();
+    std::fs::write("slop.uexp", final_uexp.get_ref()).unwrap();
+
     // TODO also rename mise export
     pak.write_file("Mods/Maps/slop.umap", true, final_umap.get_ref())
         .expect("failed to write umap to pak");
     pak.write_file("Mods/Maps/slop.uexp", true, final_uexp.get_ref())
         .expect("failed to write uexp to pak");
+
+    for (name, bytes) in MISE_FILES {
+        let path = format!("Mods/Maps/mise/{}", name);
+        pak.write_file(&path, true, bytes)
+            .expect(&format!("failed to write {} to pak", name));
+    }
     pak.write_index().unwrap();
 }
