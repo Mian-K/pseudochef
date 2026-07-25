@@ -15,15 +15,30 @@ use brush_to_mesh::convert_to_mesh;
 mod obj_export;
 
 const MISE_FILES: &[(&str, &[u8])] = &[
-    ("BP_ExaminableGrave.uasset", include_bytes!("mise/BP_ExaminableGrave.uasset")),
-    ("BP_ExaminableGrave.uexp", include_bytes!("mise/BP_ExaminableGrave.uexp")),
+    (
+        "BP_ExaminableGrave.uasset",
+        include_bytes!("mise/BP_ExaminableGrave.uasset"),
+    ),
+    (
+        "BP_ExaminableGrave.uexp",
+        include_bytes!("mise/BP_ExaminableGrave.uexp"),
+    ),
     ("BP_Hazard.uasset", include_bytes!("mise/BP_Hazard.uasset")),
     ("BP_Hazard.uexp", include_bytes!("mise/BP_Hazard.uexp")),
     ("M_HazMat.uasset", include_bytes!("mise/M_HazMat.uasset")),
     ("M_HazMat.uexp", include_bytes!("mise/M_HazMat.uexp")),
-    ("SM_ExampleBox.uasset", include_bytes!("mise/SM_ExampleBox.uasset")),
-    ("SM_ExampleBox.uexp", include_bytes!("mise/SM_ExampleBox.uexp")),
-    ("SM_ExampleBox.ubulk", include_bytes!("mise/SM_ExampleBox.ubulk")),
+    (
+        "SM_ExampleBox.uasset",
+        include_bytes!("mise/SM_ExampleBox.uasset"),
+    ),
+    (
+        "SM_ExampleBox.uexp",
+        include_bytes!("mise/SM_ExampleBox.uexp"),
+    ),
+    (
+        "SM_ExampleBox.ubulk",
+        include_bytes!("mise/SM_ExampleBox.ubulk"),
+    ),
 ];
 
 const MISE_UMAP: &[u8] = include_bytes!("mise/mise.umap");
@@ -43,10 +58,7 @@ fn default_opts() -> pseudocooker::CookOptions {
 }
 
 type UnrealExportConstraint<'a, C> = Box<
-    dyn Fn(
-            &unreal_asset::Asset<C>,
-            &unreal_asset::exports::NormalExport<PackageIndex>,
-        ) -> bool
+    dyn Fn(&unreal_asset::Asset<C>, &unreal_asset::exports::NormalExport<PackageIndex>) -> bool
         + 'a,
 >;
 
