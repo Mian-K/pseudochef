@@ -3,6 +3,7 @@ use std::fs::{File, read_to_string};
 use std::io::{Read, Seek};
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
+use unreal_asset::reader::ArchiveTrait;
 
 mod brush_to_mesh;
 // Not called from the pipeline yet; used ad hoc (e.g. from a debugger or a
@@ -88,6 +89,42 @@ fn find_export<'a, C: Read + Seek>(
         }
     }
     maybe_idx
+}
+
+fn find_vec_property_mut<'a>(
+    export: &'a mut unreal_asset::Export<unreal_asset::types::PackageIndex>,
+    name: &str,
+) -> Option<&'a mut unreal_asset::properties::vector_property::VectorProperty> {
+    let mut result = None;
+    let props = &mut export.get_normal_export_mut().unwrap().properties;
+    for prop in props {
+        if let unreal_asset::properties::Property::StructProperty(struct_prop) = prop {
+            if struct_prop.name.get_content(|content| content == name) {
+                for prop in &mut struct_prop.value {
+                    if let unreal_asset::properties::Property::VectorProperty(vec_prop) = prop {
+                        result = Some(vec_prop);
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
+fn find_obj_property_mut<'a>(
+    export: &'a mut unreal_asset::Export<unreal_asset::types::PackageIndex>,
+    name: &str,
+) -> Option<&'a mut unreal_asset::properties::object_property::ObjectProperty> {
+    let mut result = None;
+    let props = &mut export.get_normal_export_mut().unwrap().properties;
+    for prop in props {
+        if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
+            if obj_prop.name.get_content(|content| content == name) {
+                result = Some(obj_prop);
+            }
+        }
+    }
+    return result;
 }
 
 fn main() {
@@ -193,17 +230,54 @@ fn main() {
                 with_name("StaticMeshComponent0"),
                 with_import("StaticMesh", "SM_ExampleBox"),
             ],
-        );
-        println!("static mesh actor: {:?}", idx);
-        if let Some(idx) = idx {
-            let umap = &mut umap;
+        )
+        .expect("couldn't find StaticMeshComponent0 with StaticMesh property: SM_ExampleBox");
+        {
+            let export = umap.get_export_mut(idx).unwrap().clone();
+            let idx2 = export.get_base_export().outer_index;
+            let export2 = umap.get_export_mut(idx2).unwrap().clone();
+            umap.asset_data.exports.push(export2);
+            umap.asset_data.exports.push(export);
+        }
+        let idx3 =
+            unreal_asset::types::PackageIndex::new((umap.asset_data.exports.len() - 1) as i32);
+        let idx4 = unreal_asset::types::PackageIndex::new(umap.asset_data.exports.len() as i32);
+        {
+            // StaticMeshActor
+            let fname = umap.add_fname_with_number("StaticMeshActor", 7);
+            let export3 = umap.get_export_mut(idx3).unwrap();
+            export3.get_base_export_mut().object_name = fname;
+            export3
+                .get_base_export_mut()
+                .create_before_serialization_dependencies[0] = idx4;
+        }
+        {
+            // StaticMeshComponent0
+            let export4 = umap.get_export_mut(idx4).unwrap();
+            export4.get_base_export_mut().outer_index = idx3;
+            export4
+                .get_base_export_mut()
+                .create_before_create_dependencies[0] = idx3;
+            export4
+                .get_base_export_mut()
+                .create_before_serialization_dependencies
+                .push(unreal_asset::types::PackageIndex::new(-47));
+            {
+                let prop = find_obj_property_mut(export4, "StaticMesh")
+                    .expect("couldn't find StaticMesh property");
+                prop.value = unreal_asset::types::PackageIndex::new(-47);
+            }
+            {
+                let prop = find_vec_property_mut(export4, "RelativeLocation")
+                    .expect("couldn't find RelativeLocation property");
+                prop.value.x.0 = 200.0;
+            }
+        }
+        {
+            let idx = find_export(&umap, &vec![with_name("PersistentLevel")]).expect("couldn't find PersistentLevel");
             let export = umap.get_export_mut(idx).unwrap();
-            let props = &mut export.get_normal_export_mut().unwrap().properties;
-            for prop in props {
-                if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
-                    obj_prop.value = unreal_asset::types::PackageIndex::new(-47);
-                    break;
-                }
+            if let unreal_asset::Export::LevelExport(level_export) = export {
+                level_export.actors.push(idx3);
             }
         }
     }
