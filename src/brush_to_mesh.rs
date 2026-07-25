@@ -145,20 +145,38 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
         .min_by(|a, b| (a.x, a.y, a.z).partial_cmp(&(b.x, b.y, b.z)).unwrap())
         .expect("a convex brush has at least one vertex");
 
+    // The true (geometric) outward normal, independent of `calculate_normal`'s
+    // raw sign convention -- see `interior_signs` above. This is kept separate
+    // from the `normal` passed to `triangulate_face` below: that one only
+    // needs to be *some* consistent convention to drive triangle winding
+    // (which is already correct for Unreal's culling/collision as-is), while
+    // this one is baked as an explicit per-face vertex normal so lighting
+    // doesn't depend on winding at all. Keeping the two independent means
+    // fixing lighting here can't also flip winding and break culling/collision.
+    let true_outward_normals: Vec<Vec3> = normals
+        .iter()
+        .zip(interior_signs.iter())
+        .map(|(n, s)| *n * *s)
+        .collect();
+
     let mut positions = vec![];
     let mut faces = vec![];
-    for (normal, face_vertices) in normals.iter().zip(vertices.iter()) {
+    let mut mesh_normals = vec![];
+    for (i, (normal, face_vertices)) in normals.iter().zip(vertices.iter()).enumerate() {
         let base = positions.len();
         let (points, triangles) = triangulate_face(*normal, face_vertices, target_vertex_spacing);
         positions.extend(points.iter().map(|p| [p.x as f64, p.y as f64, p.z as f64]));
+        let n = true_outward_normals[i].normalize();
+        let normal_index = mesh_normals.len();
+        mesh_normals.push([n.x as f64, n.y as f64, n.z as f64]);
         for [a, b, c] in triangles {
             // TODO unhardcode material_index; would need to pass in whole entity, not just brush
             faces.push(pseudocooker::Face {
                 material_index: 0,
                 corners: vec![
-                    pseudocooker::Corner::new(base + a),
-                    pseudocooker::Corner::new(base + b),
-                    pseudocooker::Corner::new(base + c),
+                    pseudocooker::Corner::new(base + a).with_normal(normal_index),
+                    pseudocooker::Corner::new(base + b).with_normal(normal_index),
+                    pseudocooker::Corner::new(base + c).with_normal(normal_index),
                 ],
             });
         }
@@ -167,7 +185,7 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
     let mut mesh = pseudocooker::MeshInput {
         positions,
         uvs: Vec::new(),
-        normals: Vec::new(),
+        normals: mesh_normals,
         faces,
         material_names: vec![],
     };
@@ -511,6 +529,53 @@ mod tests {
         BrushPlane {
             plane: TrianglePlane { v0, v1, v2 },
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn convert_to_mesh_bakes_outward_facing_normals_without_flipping_winding() {
+        // Regression test: with no explicit normals, pseudocooker derives a
+        // per-vertex lighting normal from triangle winding -- which is tuned
+        // for Unreal's culling/collision convention, not for "true" outward
+        // geometric direction, and (since brush_to_mesh welds shared-edge
+        // positions across adjacent faces) ends up averaging normals across
+        // faces at every corner instead of giving flat per-face shading.
+        // convert_to_mesh now bakes an explicit, geometrically-correct
+        // outward normal per face via `Corner::with_normal`, independent of
+        // triangle winding, so lighting can be fixed without touching
+        // winding at all -- and therefore without risking the
+        // culling/collision correctness the watertightness tests above
+        // already cover.
+        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let planes = vec![
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
+            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
+            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+        ];
+        let brush = Brush::new(planes);
+        let (mesh, _origin) = convert_to_mesh(&brush, 0.0);
+
+        let mesh_centroid = mesh
+            .positions
+            .iter()
+            .fold(Vec3::ZERO, |acc, p| acc + Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
+            / mesh.positions.len() as f32;
+
+        for face in &mesh.faces {
+            for corner in &face.corners {
+                let normal_idx = corner.normal.expect("convert_to_mesh should bake an explicit normal for every corner");
+                let n = mesh.normals[normal_idx];
+                let n = Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32);
+                let p = mesh.positions[corner.position];
+                let p = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+                assert!(
+                    n.dot(p - mesh_centroid) > 0.0,
+                    "baked normal {n:?} at vertex {p:?} doesn't point away from the mesh center"
+                );
+            }
         }
     }
 
