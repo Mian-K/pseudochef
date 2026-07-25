@@ -1,6 +1,7 @@
 use shalrath::parser::repr::parse_map;
 use std::fs::{File, read_to_string};
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
+use std::time::{Duration, Instant};
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::reader::ArchiveTrait;
@@ -126,6 +127,28 @@ fn find_obj_property_mut<'a>(
     return result;
 }
 
+fn process_brush<C: Read + Seek, W: Write + Seek>(
+    umap: &mut unreal_asset::Asset<C>,
+    pak: &mut repak::PakWriter<W>,
+    i: usize,
+    brush: &shalrath::repr::Brush,
+) {
+    let (mesh, origin) = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
+    let name = format!("tb{}", i);
+    let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
+    pak.write_file(
+        &format!("Mods/Maps/slop/{}.uasset", name),
+        true,
+        &cooked.uasset,
+    )
+    .expect("failed to write uasset to pak");
+    pak.write_file(&format!("Mods/Maps/slop/{}.uexp", name), true, &cooked.uexp)
+        .expect("failed to write uasset to pak");
+    println!("cooked {}", name);
+    // TODO clone an import for it
+    // TODO clone an export for it
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -135,30 +158,6 @@ fn main() {
 
     let (_, ast) = parse_map(&map_contents).expect("failed to parse map file");
 
-    let mut pak = repak::PakBuilder::new().compression(vec![repak::Compression::Zlib]).writer(
-        File::create(&args[2]).unwrap(),
-        repak::Version::V11,
-        "../../../pseudoregalia/Content/".to_string(),
-        None,
-    );
-
-    for ent in ast.0 {
-        for (i, brush) in ent.brushes.0.iter().enumerate() {
-            let (mesh, _origin) = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
-            let name = format!("tb{}", i);
-            let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
-            pak.write_file(
-                &format!("Mods/Maps/slop/{}.uasset", name),
-                true,
-                &cooked.uasset,
-            )
-            .expect("failed to write uasset to pak");
-            pak.write_file(&format!("Mods/Maps/slop/{}.uexp", name), true, &cooked.uexp)
-                .expect("failed to write uasset to pak");
-            println!("cooked {}", name);
-        }
-    }
-
     let mut umap = unreal_asset::Asset::new(
         std::io::Cursor::new(MISE_UMAP),
         Some(std::io::Cursor::new(MISE_UEXP)),
@@ -166,6 +165,21 @@ fn main() {
         None,
     )
     .expect("failed to parse umap");
+
+    let mut pak = repak::PakBuilder::new()
+        .compression(vec![repak::Compression::Zlib])
+        .writer(
+            File::create(&args[2]).expect("failed to open pak file for writing"),
+            repak::Version::V11,
+            "../../../pseudoregalia/Content/".to_string(),
+            None,
+        );
+
+    for ent in ast.0 {
+        for (i, brush) in ent.brushes.0.iter().enumerate() {
+            process_brush(&mut umap, &mut pak, i, brush);
+        }
+    }
 
     // clone Package import
     {
