@@ -1,10 +1,12 @@
 use shalrath::parser::repr::parse_map;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
+use std::ops::Mul;
 use std::time::{Duration, Instant};
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::reader::ArchiveTrait;
+use unreal_asset::types::PackageIndex;
 
 mod brush_to_mesh;
 use brush_to_mesh::convert_to_mesh;
@@ -127,6 +129,55 @@ fn find_obj_property_mut<'a>(
     return result;
 }
 
+fn find_import<C: Read + Seek>(
+    asset: &mut unreal_asset::Asset<C>,
+    class_name: &str,
+    object_name: &str,
+) -> Option<unreal_asset::types::PackageIndex> {
+    for (i, import) in asset.imports.iter().enumerate() {
+        if import
+            .class_name
+            .get_content(|content| content == class_name)
+            && import
+                .object_name
+                .get_content(|content| content == object_name)
+        {
+            return Some(unreal_asset::types::PackageIndex::new(-((i + 1) as i32)));
+        }
+    }
+    return None;
+}
+
+use std::sync::atomic::{AtomicI32, Ordering};
+
+fn export_clone_counter() -> i32 {
+    static COUNT: AtomicI32 = AtomicI32::new(100);
+    COUNT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn clone_export<C: Read + Seek>(
+    asset: &mut unreal_asset::Asset<C>,
+    idx: PackageIndex,
+) -> Option<PackageIndex> {
+    let mut export = asset.get_export(idx)?.clone();
+    let old_name = export.get_base_export().object_name.get_owned_content();
+    let new_name = format!("pseudochef_{}", old_name);
+    let new_fname = asset.add_fname_with_number(&new_name, export_clone_counter());
+    export.get_base_export_mut().object_name = new_fname;
+    asset.asset_data.exports.push(export);
+    return Some(PackageIndex::new(asset.asset_data.exports.len() as i32));
+}
+
+fn add_actor<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageIndex) {
+    let level_idx = find_export(asset, &vec![with_name("PersistentLevel")]).unwrap();
+    let export = asset.get_export_mut(level_idx).unwrap();
+    if let unreal_asset::Export::LevelExport(level_export) = export {
+        level_export.actors.push(idx);
+    } else {
+        panic!();
+    }
+}
+
 fn process_brush<C: Read + Seek, W: Write + Seek>(
     umap: &mut unreal_asset::Asset<C>,
     pak: &mut repak::PakWriter<W>,
@@ -134,6 +185,8 @@ fn process_brush<C: Read + Seek, W: Write + Seek>(
     brush: &shalrath::repr::Brush,
 ) {
     let (mesh, origin) = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
+    let mut origin = glam::DVec3::from(origin);
+    origin *= 4.0;
     let name = format!("tb{}", i);
     let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
     pak.write_file(
@@ -145,8 +198,68 @@ fn process_brush<C: Read + Seek, W: Write + Seek>(
     pak.write_file(&format!("Mods/Maps/slop/{}.uexp", name), true, &cooked.uexp)
         .expect("failed to write uasset to pak");
     println!("cooked {}", name);
-    // TODO clone an import for it
-    // TODO clone an export for it
+
+    let new_import_idx = {
+        let idx1 = find_import(umap, "Package", "/Game/Mods/Maps/MyLevel/SM_ExampleBox").unwrap();
+        let idx2 = find_import(umap, "StaticMesh", "SM_ExampleBox").unwrap();
+        let mut import1c = umap.get_import(idx1).unwrap().clone();
+        import1c.object_name = umap.add_fname(&format!("/Game/Mods/Maps/slop/{}", name));
+        let idx1c = umap.add_import(import1c);
+        let mut import2c = umap.get_import(idx2).unwrap().clone();
+        import2c.object_name = umap.add_fname(&name);
+        import2c.outer_index = idx1c;
+        umap.add_import(import2c)
+    };
+
+    {
+        let idx1 = find_export(
+            &umap,
+            &vec![
+                with_name("StaticMeshComponent0"),
+                with_import("StaticMesh", "SM_ExampleBox"),
+            ],
+        )
+        .unwrap();
+        let export1 = umap.get_export_mut(idx1).unwrap();
+        // find parent StaticMeshActor
+        let idx2 = export1.get_base_export().outer_index;
+        let idx1c = clone_export(umap, idx1).unwrap();
+        let idx2c = clone_export(umap, idx2).unwrap();
+        add_actor(umap, idx2c);
+        {
+            // StaticMeshComponent0
+            let export1c = umap.get_export_mut(idx1c).unwrap();
+            let export1c_base = export1c.get_base_export_mut();
+            // Point to new parent
+            export1c_base.outer_index = idx2c;
+            export1c_base.create_before_create_dependencies[0] = idx2c;
+            // Point to new import
+            export1c_base
+                .create_before_serialization_dependencies
+                .push(new_import_idx);
+            {
+                let prop = find_obj_property_mut(export1c, "StaticMesh")
+                    .expect("couldn't find StaticMesh property");
+                prop.value = new_import_idx;
+            }
+            // Set world position
+            {
+                let prop = find_vec_property_mut(export1c, "RelativeLocation")
+                    .expect("couldn't find RelativeLocation property");
+                prop.value.x.0 = origin.x;
+                prop.value.y.0 = origin.y;
+                prop.value.z.0 = origin.z;
+            }
+        }
+        {
+            // StaticMeshActor
+            let export2c = umap.get_export_mut(idx2c).unwrap();
+            // Point to new child
+            export2c
+                .get_base_export_mut()
+                .create_before_serialization_dependencies[0] = idx1c;
+        }
+    }
 }
 
 fn main() {
@@ -178,87 +291,6 @@ fn main() {
     for ent in ast.0 {
         for (i, brush) in ent.brushes.0.iter().enumerate() {
             process_brush(&mut umap, &mut pak, i, brush);
-        }
-    }
-
-    // clone Package import
-    {
-        let import = umap
-            .get_import(unreal_asset::types::PackageIndex::new(-32))
-            .unwrap();
-        let mut new_import = import.clone();
-        new_import.object_name = umap.add_fname("/Game/Mods/Maps/slop/tb0");
-        umap.add_import(new_import);
-    }
-
-    // clone StaticMesh import
-    {
-        let import = umap
-            .get_import(unreal_asset::types::PackageIndex::new(-40))
-            .unwrap();
-        let mut new_import = import.clone();
-        new_import.outer_index = unreal_asset::types::PackageIndex::new(-46);
-        new_import.object_name = umap.add_fname("tb0");
-        umap.add_import(new_import);
-    }
-
-    {
-        let idx = find_export(
-            &umap,
-            &vec![
-                with_name("StaticMeshComponent0"),
-                with_import("StaticMesh", "SM_ExampleBox"),
-            ],
-        )
-        .expect("couldn't find StaticMeshComponent0 with StaticMesh property: SM_ExampleBox");
-        {
-            let export = umap.get_export_mut(idx).unwrap().clone();
-            let idx2 = export.get_base_export().outer_index;
-            let export2 = umap.get_export_mut(idx2).unwrap().clone();
-            umap.asset_data.exports.push(export2);
-            umap.asset_data.exports.push(export);
-        }
-        let idx3 =
-            unreal_asset::types::PackageIndex::new((umap.asset_data.exports.len() - 1) as i32);
-        let idx4 = unreal_asset::types::PackageIndex::new(umap.asset_data.exports.len() as i32);
-        {
-            // StaticMeshActor
-            let fname = umap.add_fname_with_number("StaticMeshActor", 7);
-            let export3 = umap.get_export_mut(idx3).unwrap();
-            export3.get_base_export_mut().object_name = fname;
-            export3
-                .get_base_export_mut()
-                .create_before_serialization_dependencies[0] = idx4;
-        }
-        {
-            // StaticMeshComponent0
-            let export4 = umap.get_export_mut(idx4).unwrap();
-            export4.get_base_export_mut().outer_index = idx3;
-            export4
-                .get_base_export_mut()
-                .create_before_create_dependencies[0] = idx3;
-            export4
-                .get_base_export_mut()
-                .create_before_serialization_dependencies
-                .push(unreal_asset::types::PackageIndex::new(-47));
-            {
-                let prop = find_obj_property_mut(export4, "StaticMesh")
-                    .expect("couldn't find StaticMesh property");
-                prop.value = unreal_asset::types::PackageIndex::new(-47);
-            }
-            {
-                let prop = find_vec_property_mut(export4, "RelativeLocation")
-                    .expect("couldn't find RelativeLocation property");
-                prop.value.x.0 = 200.0;
-            }
-        }
-        {
-            let idx = find_export(&umap, &vec![with_name("PersistentLevel")])
-                .expect("couldn't find PersistentLevel");
-            let export = umap.get_export_mut(idx).unwrap();
-            if let unreal_asset::Export::LevelExport(level_export) = export {
-                level_export.actors.push(idx3);
-            }
         }
     }
 
