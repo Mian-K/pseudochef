@@ -33,7 +33,7 @@ fn default_opts() -> pseudocooker::CookOptions {
 type UnrealExportConstraint<'a, C> = Box<
     dyn Fn(
             &unreal_asset::Asset<C>,
-            &unreal_asset::exports::NormalExport<unreal_asset::types::PackageIndex>,
+            &unreal_asset::exports::NormalExport<PackageIndex>,
         ) -> bool
         + 'a,
 >;
@@ -81,12 +81,12 @@ fn with_name<'a, C: Read + Seek>(name: &'a str) -> UnrealExportConstraint<'a, C>
 fn find_export<'a, C: Read + Seek>(
     asset: &'a unreal_asset::Asset<C>,
     constraints: &[UnrealExportConstraint<C>],
-) -> Option<unreal_asset::types::PackageIndex> {
+) -> Option<PackageIndex> {
     let mut maybe_idx = None;
     for (i, export) in asset.asset_data.exports.iter().enumerate() {
         if let Some(normal_export) = export.get_normal_export() {
             if constraints.iter().all(|f| f(asset, normal_export)) {
-                maybe_idx = Some(unreal_asset::types::PackageIndex::new((i + 1) as i32));
+                maybe_idx = Some(PackageIndex::new((i + 1) as i32));
             }
         }
     }
@@ -94,7 +94,7 @@ fn find_export<'a, C: Read + Seek>(
 }
 
 fn find_vec_property_mut<'a>(
-    export: &'a mut unreal_asset::Export<unreal_asset::types::PackageIndex>,
+    export: &'a mut unreal_asset::Export<PackageIndex>,
     name: &str,
 ) -> Option<&'a mut unreal_asset::properties::vector_property::VectorProperty> {
     let mut result = None;
@@ -114,7 +114,7 @@ fn find_vec_property_mut<'a>(
 }
 
 fn find_obj_property_mut<'a>(
-    export: &'a mut unreal_asset::Export<unreal_asset::types::PackageIndex>,
+    export: &'a mut unreal_asset::Export<PackageIndex>,
     name: &str,
 ) -> Option<&'a mut unreal_asset::properties::object_property::ObjectProperty> {
     let mut result = None;
@@ -133,7 +133,7 @@ fn find_import<C: Read + Seek>(
     asset: &mut unreal_asset::Asset<C>,
     class_name: &str,
     object_name: &str,
-) -> Option<unreal_asset::types::PackageIndex> {
+) -> Option<PackageIndex> {
     for (i, import) in asset.imports.iter().enumerate() {
         if import
             .class_name
@@ -142,7 +142,7 @@ fn find_import<C: Read + Seek>(
                 .object_name
                 .get_content(|content| content == object_name)
         {
-            return Some(unreal_asset::types::PackageIndex::new(-((i + 1) as i32)));
+            return Some(PackageIndex::new(-((i + 1) as i32)));
         }
     }
     return None;
