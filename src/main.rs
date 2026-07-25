@@ -17,7 +17,7 @@ const MISE_UEXP: &[u8] = include_bytes!("mise.uexp");
 // World-space (map-unit) spacing between generated interior face vertices;
 // see `brush_to_mesh::convert_to_mesh`. Smaller values give smoother
 // per-vertex lighting at the cost of more geometry.
-const FACE_VERTEX_SPACING: f32 = 64.0;
+const FACE_VERTEX_SPACING: f32 = 32.0;
 
 fn default_opts() -> pseudocooker::CookOptions {
     pseudocooker::CookOptions {
@@ -27,7 +27,7 @@ fn default_opts() -> pseudocooker::CookOptions {
     }
 }
 
-type UnrealExportConstraint<'a, C: Read + Seek> = Box<
+type UnrealExportConstraint<'a, C> = Box<
     dyn Fn(
             &unreal_asset::Asset<C>,
             &unreal_asset::exports::NormalExport<unreal_asset::types::PackageIndex>,
@@ -129,7 +129,7 @@ fn main() {
         }
     }
 
-    let mut umap = unreal_asset::Asset::new(
+    let umap = unreal_asset::Asset::new(
         std::io::Cursor::new(MISE_UMAP),
         Some(std::io::Cursor::new(MISE_UEXP)),
         unreal_asset::engine_version::EngineVersion::VER_UE5_1,
@@ -196,7 +196,7 @@ fn main() {
                 with_import("StaticMesh", "SM_ExampleBox"),
             ],
         );
-        println!("{:?}", idx);
+        println!("static mesh actor: {:?}", idx);
     }
     /*
 
