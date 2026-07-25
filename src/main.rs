@@ -1,5 +1,6 @@
 use shalrath::parser::repr::parse_map;
 use std::fs::{File, read_to_string};
+use std::io::{Read, Seek};
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
 
@@ -9,6 +10,7 @@ mod brush_to_mesh;
 #[allow(dead_code)]
 mod obj_export;
 use brush_to_mesh::convert_to_mesh;
+use obj_export::write_obj_file;
 
 const MISE_UMAP: &[u8] = include_bytes!("mise.umap");
 const MISE_UEXP: &[u8] = include_bytes!("mise.uexp");
@@ -23,6 +25,69 @@ fn default_opts() -> pseudocooker::CookOptions {
         lighting_guid: None,
         package_guid: None,
     }
+}
+
+type UnrealExportConstraint<'a, C: Read + Seek> = Box<
+    dyn Fn(
+            &unreal_asset::Asset<C>,
+            &unreal_asset::exports::NormalExport<unreal_asset::types::PackageIndex>,
+        ) -> bool
+        + 'a,
+>;
+
+fn with_import<'a, C: Read + Seek>(
+    obj_prop_name: &'a str,
+    import_name: &'a str,
+) -> UnrealExportConstraint<'a, C> {
+    Box::new(move |asset, export| {
+        let mut matching_prop = None;
+        for prop in &export.properties {
+            if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
+                if obj_prop
+                    .name
+                    .get_content(|content| content == obj_prop_name)
+                {
+                    matching_prop = Some(obj_prop);
+                }
+            }
+        }
+
+        let Some(prop) = matching_prop else {
+            return false;
+        };
+
+        // this is expected to be an import
+        assert!(prop.value.index < 0);
+        let import = asset
+            .get_import(prop.value)
+            .expect(&format!("failed to get import {}", prop.value.index));
+        return import
+            .object_name
+            .get_content(|content| content == import_name);
+    })
+}
+fn with_name<'a, C: Read + Seek>(name: &'a str) -> UnrealExportConstraint<'a, C> {
+    Box::new(move |_, export| {
+        export
+            .base_export
+            .object_name
+            .get_content(|content| content == name)
+    })
+}
+
+fn find_export<'a, C: Read + Seek>(
+    asset: &'a unreal_asset::Asset<C>,
+    constraints: &[UnrealExportConstraint<C>],
+) -> Option<unreal_asset::types::PackageIndex> {
+    let mut maybe_idx = None;
+    for (i, export) in asset.asset_data.exports.iter().enumerate() {
+        if let Some(normal_export) = export.get_normal_export() {
+            if constraints.iter().all(|f| f(asset, normal_export)) {
+                maybe_idx = Some(unreal_asset::types::PackageIndex::new((i + 1) as i32));
+            }
+        }
+    }
+    maybe_idx
 }
 
 fn main() {
@@ -45,6 +110,12 @@ fn main() {
         for brush in &ent.brushes.0 {
             let mesh = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
             let name = format!("tb{}", i);
+            {
+                // tmp for debugging
+                let name = format!("tb{}.obj", i);
+                let path = std::path::Path::new(&name);
+                write_obj_file(&mesh, &path).unwrap();
+            }
             let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
             pak.write_file(
                 &format!("Mods/Maps/slop/{}.uasset", name),
@@ -66,6 +137,7 @@ fn main() {
     )
     .expect("failed to parse umap");
 
+    /*
     // clone Package import
     {
         let import = umap
@@ -86,6 +158,7 @@ fn main() {
         new_import.object_name = umap.add_fname("tb0");
         umap.add_import(new_import);
     }
+    */
 
     // to clone a static mesh actor export, we must:
     // - clone the StaticMeshActor
@@ -115,6 +188,18 @@ fn main() {
     }
     */
 
+    {
+        let idx = find_export(
+            &umap,
+            &vec![
+                with_name("StaticMeshComponent0"),
+                with_import("StaticMesh", "SM_ExampleBox"),
+            ],
+        );
+        println!("{:?}", idx);
+    }
+    /*
+
     // edit the static mesh asset of a StaticMeshActor
     {
         let props = &mut umap
@@ -139,6 +224,7 @@ fn main() {
             .get_base_export_mut()
             .object_name = fname;
     }
+    */
 
     // TODO generate obj files and write them to the umap and the pak
 
