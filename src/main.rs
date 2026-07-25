@@ -195,34 +195,6 @@ fn main() {
         umap.add_import(new_import);
     }
 
-    // to clone a static mesh actor export, we must:
-    // - clone the StaticMeshActor
-    // - set create_before_serialization_dependencies to the StaticMeshComponent0
-    // - clone the StaticMeshComponent0
-    // - set create_before_create_dependencies to the StaticMeshActor
-    // to make it point to a different static mesh asset, we must:
-    // - set the value of the ObjectProperty of the StaticMeshComponent0 to point to the package
-    //   index of the import
-    /*
-    {
-        let export = umap
-            .get_export(unreal_asset::types::PackageIndex::new(19))
-            .unwrap();
-        let mut new_export = export.clone();
-        let props = &mut new_export.get_normal_export_mut().unwrap().properties;
-        for prop in props {
-            if let unreal_asset::properties::Property::StructProperty(struct_prop) = prop {
-                for prop in &mut struct_prop.value {
-                    if let unreal_asset::properties::Property::VectorProperty(vec_prop) = prop {
-                        vec_prop.value.x = ordered_float::OrderedFloat(400.0);
-                    }
-                }
-            }
-        }
-        umap.asset_data.exports.push(new_export);
-    }
-    */
-
     {
         let idx = find_export(
             &umap,
@@ -274,27 +246,11 @@ fn main() {
             }
         }
         {
-            let idx = find_export(&umap, &vec![with_name("PersistentLevel")]).expect("couldn't find PersistentLevel");
+            let idx = find_export(&umap, &vec![with_name("PersistentLevel")])
+                .expect("couldn't find PersistentLevel");
             let export = umap.get_export_mut(idx).unwrap();
             if let unreal_asset::Export::LevelExport(level_export) = export {
                 level_export.actors.push(idx3);
-            }
-        }
-    }
-    /*
-
-    // edit the static mesh asset of a StaticMeshActor
-    {
-        let props = &mut umap
-            .get_export_mut(unreal_asset::types::PackageIndex::new(19))
-            .unwrap()
-            .get_normal_export_mut()
-            .unwrap()
-            .properties;
-        for prop in props {
-            if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
-                obj_prop.value = unreal_asset::types::PackageIndex::new(-56);
-                break;
             }
         }
     }
@@ -302,12 +258,10 @@ fn main() {
     // rename level export (for swag only; seemingly inconsequential)
     {
         let fname = umap.add_fname("pseudochef_slop");
-        umap.get_export_mut(unreal_asset::types::PackageIndex::new(20))
-            .unwrap()
-            .get_base_export_mut()
-            .object_name = fname;
+        let idx = find_export(&umap, &vec![with_name("mise")]).expect("couldn't find mise");
+        let export = umap.get_export_mut(idx).unwrap();
+        export.get_base_export_mut().object_name = fname;
     }
-    */
 
     // TODO generate obj files and write them to the umap and the pak
 
