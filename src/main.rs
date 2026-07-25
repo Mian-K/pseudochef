@@ -129,7 +129,7 @@ fn main() {
         }
     }
 
-    let umap = unreal_asset::Asset::new(
+    let mut umap = unreal_asset::Asset::new(
         std::io::Cursor::new(MISE_UMAP),
         Some(std::io::Cursor::new(MISE_UEXP)),
         unreal_asset::engine_version::EngineVersion::VER_UE5_1,
@@ -137,11 +137,10 @@ fn main() {
     )
     .expect("failed to parse umap");
 
-    /*
     // clone Package import
     {
         let import = umap
-            .get_import(unreal_asset::types::PackageIndex::new(-39))
+            .get_import(unreal_asset::types::PackageIndex::new(-32))
             .unwrap();
         let mut new_import = import.clone();
         new_import.object_name = umap.add_fname("/Game/Mods/Maps/slop/tb0");
@@ -151,14 +150,13 @@ fn main() {
     // clone StaticMesh import
     {
         let import = umap
-            .get_import(unreal_asset::types::PackageIndex::new(-49))
+            .get_import(unreal_asset::types::PackageIndex::new(-40))
             .unwrap();
         let mut new_import = import.clone();
-        new_import.outer_index = unreal_asset::types::PackageIndex::new(-55);
+        new_import.outer_index = unreal_asset::types::PackageIndex::new(-46);
         new_import.object_name = umap.add_fname("tb0");
         umap.add_import(new_import);
     }
-    */
 
     // to clone a static mesh actor export, we must:
     // - clone the StaticMeshActor
@@ -197,6 +195,17 @@ fn main() {
             ],
         );
         println!("static mesh actor: {:?}", idx);
+        if let Some(idx) = idx {
+            let umap = &mut umap;
+            let export = umap.get_export_mut(idx).unwrap();
+            let props = &mut export.get_normal_export_mut().unwrap().properties;
+            for prop in props {
+                if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
+                    obj_prop.value = unreal_asset::types::PackageIndex::new(-47);
+                    break;
+                }
+            }
+        }
     }
     /*
 
