@@ -32,7 +32,7 @@ const MISE_UEXP: &[u8] = include_bytes!("mise/mise.uexp");
 // World-space (map-unit) spacing between generated interior face vertices;
 // see `brush_to_mesh::convert_to_mesh`. Smaller values give smoother
 // per-vertex lighting at the cost of more geometry.
-const FACE_VERTEX_SPACING: f32 = 64.0;
+const FACE_VERTEX_SPACING: f64 = 64.0;
 
 fn default_opts() -> pseudocooker::CookOptions {
     pseudocooker::CookOptions {

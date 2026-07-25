@@ -1,15 +1,15 @@
-use glam::{Mat3, Vec3};
+use glam::{DMat3, DVec3};
 use itertools::Itertools;
 use spade::{DelaunayTriangulation, Point2, Triangulation};
 use std::collections::HashMap;
 
-fn vec3(p: shalrath::repr::Point) -> Vec3 {
-    Vec3::new(p.x, p.y, p.z)
+fn dvec3(p: shalrath::repr::Point) -> DVec3 {
+    DVec3::new(p.x as f64, p.y as f64, p.z as f64)
 }
-fn calculate_normal(plane: shalrath::repr::TrianglePlane) -> Vec3 {
-    let p0 = vec3(plane.v0);
-    let p1 = vec3(plane.v1);
-    let p2 = vec3(plane.v2);
+fn calculate_normal(plane: shalrath::repr::TrianglePlane) -> DVec3 {
+    let p0 = dvec3(plane.v0);
+    let p1 = dvec3(plane.v1);
+    let p2 = dvec3(plane.v2);
     let a = p2 - p0;
     let b = p1 - p0;
     a.cross(b)
@@ -43,14 +43,19 @@ fn mirror_xz(brush: &shalrath::repr::Brush) -> shalrath::repr::Brush {
 /// mesh are all relative to this origin rather than world-space, which keeps
 /// the mesh's own coordinates small and independent of where the brush sits
 /// in the map.
-pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32) -> (pseudocooker::MeshInput, Vec3) {
+pub fn convert_to_mesh(
+    brush: &shalrath::repr::Brush,
+    target_vertex_spacing: f64,
+) -> (pseudocooker::MeshInput, DVec3) {
     // TrenchBroom uses a right-handed coordinate system with +z pointing up.
     // Unreal uses a left-handed coordinate system with +z pointing up.
     // So, we mirror across the xz-plane when converting.
     let brush = mirror_xz(&brush);
 
+    // TODO dedup this normal calculation
+    // TODO double check that the normals are correct
     let mut vertices = vec![vec![]; brush.0.len()];
-    let mut normals = vec![];
+    let mut normals: Vec<DVec3> = vec![];
     for plane in &brush.0 {
         normals.push(calculate_normal(plane.plane));
     }
@@ -62,38 +67,45 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
         .collect();
     // Determinant threshold for treating three plane normals as linearly independent
     // (i.e. the planes meet at a unique point rather than being parallel/degenerate).
-    const DET_EPSILON: f32 = 1e-6;
+    const DET_EPSILON: f64 = 1e-6;
     // World-space distance threshold used both to decide whether a candidate point
     // actually lies inside every plane's half-space, and to dedupe vertices that
     // more than 3 planes meet at (e.g. a chamfered corner or a pyramid apex).
-    const VERTEX_EPSILON: f32 = 1e-2;
+    const VERTEX_EPSILON: f64 = 1e-2;
     // `calculate_normal`'s sign convention (outward vs. inward) depends on the
     // winding of each plane's 3 points, which flips uniformly for every face
     // when the brush is mirrored above. Rather than hardcode which convention
     // applies post-mirror, derive which side of each plane is "interior" from
     // a point that's roughly in the middle of the brush.
-    let interior_reference: Vec3 = planes_and_normals.iter().map(|(_, p, _)| vec3(p.v0)).sum::<Vec3>()
-        / planes_and_normals.len() as f32;
-    let interior_signs: Vec<f32> = planes_and_normals
+    let interior_reference: DVec3 = planes_and_normals
+        .iter()
+        .map(|(_, p, _)| dvec3(p.v0))
+        .sum::<DVec3>()
+        / planes_and_normals.len() as f64;
+    let interior_signs: Vec<f64> = planes_and_normals
         .iter()
         .map(|(_, p, n)| {
-            let x = vec3(p.v0);
+            let x = dvec3(p.v0);
             // Choose the sign so that `(point - x).dot(n) * sign` is <= 0 for the
             // interior reference point, i.e. so margin <= 0 means "interior side".
-            if (interior_reference - x).dot(*n) >= 0.0 { -1.0 } else { 1.0 }
+            if (interior_reference - x).dot(*n) >= 0.0 {
+                -1.0
+            } else {
+                1.0
+            }
         })
         .collect();
     for c in planes_and_normals.iter().combinations(3) {
         let (i0, p0, n0) = c[0];
         let (i1, p1, n1) = c[1];
         let (i2, p2, n2) = c[2];
-        let x0 = vec3(p0.v0);
-        let x1 = vec3(p1.v0);
-        let x2 = vec3(p2.v0);
+        let x0 = dvec3(p0.v0);
+        let x1 = dvec3(p1.v0);
+        let x2 = dvec3(p2.v0);
         let u0 = n0.normalize();
         let u1 = n1.normalize();
         let u2 = n2.normalize();
-        let det = Mat3::from_cols(u0, u1, u2).determinant();
+        let det = DMat3::from_cols(u0, u1, u2).determinant();
         if det.abs() < DET_EPSILON {
             // Normals are (near-)parallel: these three planes don't meet at a
             // single point, so there's nothing to intersect.
@@ -108,14 +120,13 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
         // lies on the interior side of every plane, not just the three we
         // solved with. This is what makes the intersection test work for any
         // convex brush, not just ones where faces meet at right angles.
-        let is_vertex = planes_and_normals
-            .iter()
-            .zip(interior_signs.iter())
-            .all(|((_, plane, normal), sign)| {
-                let x = vec3(plane.v0);
+        let is_vertex = planes_and_normals.iter().zip(interior_signs.iter()).all(
+            |((_, plane, normal), sign)| {
+                let x = dvec3(plane.v0);
                 let n = normal.normalize();
                 (intersection - x).dot(n) * sign <= VERTEX_EPSILON
-            });
+            },
+        );
         if !is_vertex {
             continue;
         }
@@ -126,7 +137,7 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
             // This is unlikely with brushes but we account for it anyway.
             let is_duplicate = face_vertices
                 .iter()
-                .any(|v: &Vec3| v.distance(intersection) < VERTEX_EPSILON);
+                .any(|v: &DVec3| v.distance(intersection) < VERTEX_EPSILON);
             if !is_duplicate {
                 face_vertices.push(intersection);
             }
@@ -153,7 +164,7 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
     // this one is baked as an explicit per-face vertex normal so lighting
     // doesn't depend on winding at all. Keeping the two independent means
     // fixing lighting here can't also flip winding and break culling/collision.
-    let true_outward_normals: Vec<Vec3> = normals
+    let true_outward_normals: Vec<DVec3> = normals
         .iter()
         .zip(interior_signs.iter())
         .map(|(n, s)| *n * *s)
@@ -184,7 +195,7 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
 
     let mut mesh = pseudocooker::MeshInput {
         positions,
-        uvs: Vec::new(),
+        uvs: vec![],
         normals: mesh_normals,
         faces,
         material_names: vec![],
@@ -261,10 +272,13 @@ fn weld_vertices(mesh: &mut pseudocooker::MeshInput, epsilon: f64) {
         'search: for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
-                    let Some(candidates) = buckets.get(&(cx + dx, cy + dy, cz + dz)) else { continue };
+                    let Some(candidates) = buckets.get(&(cx + dx, cy + dy, cz + dz)) else {
+                        continue;
+                    };
                     for &j in candidates {
                         let q = welded_positions[j];
-                        let d2 = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2);
+                        let d2 =
+                            (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2);
                         if d2 < epsilon * epsilon {
                             existing = Some(j);
                             break 'search;
@@ -317,7 +331,11 @@ fn weld_vertices(mesh: &mut pseudocooker::MeshInput, epsilon: f64) {
 /// Returns the (deduplicated) points used -- boundary corners and edge
 /// subdivisions first, in polygon order, followed by any generated interior
 /// points -- and a list of triangles as indices into that point list.
-fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Vec<Vec3>, Vec<[usize; 3]>) {
+fn triangulate_face(
+    normal: DVec3,
+    boundary: &[DVec3],
+    target_spacing: f64,
+) -> (Vec<DVec3>, Vec<[usize; 3]>) {
     if boundary.len() < 3 {
         return (boundary.to_vec(), vec![]);
     }
@@ -327,18 +345,18 @@ fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Ve
     // u.cross(v) == n: a counterclockwise triangle in (u, v) coordinates
     // then has outward normal n, matching the winding the rest of the
     // pipeline expects.
-    let reference = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let reference = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
     let u = n.cross(reference).normalize();
     let v = n.cross(u);
     let origin = boundary[0];
-    let project = |p: Vec3| -> (f32, f32) {
+    let project = |p: DVec3| -> (f64, f64) {
         let d = p - origin;
         (d.dot(u), d.dot(v))
     };
-    let unproject = |(x, y): (f32, f32)| -> Vec3 { origin + u * x + v * y };
+    let unproject = |(x, y): (f64, f64)| -> DVec3 { origin + u * x + v * y };
 
     // Keep each corner's original (pre-projection) 3D position alongside its
-    // 2D projection: two faces sharing an edge hold bit-identical Vec3
+    // 2D projection: two faces sharing an edge hold bit-identical DVec3
     // endpoints for it (see the plane-intersection loop above), so measuring
     // edge length in 3D -- rather than off each face's own reprojected 2D
     // coordinates, which can differ by a few ULPs between faces -- gives both
@@ -347,18 +365,20 @@ fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Ve
     // `spacing * (k + 0.5)` rounding boundary can subdivide to a different
     // number of points on each side of the edge, leaving a hole that welding
     // can't fix since the two sides don't even agree on point count.
-    let mut corners: Vec<((f32, f32), Vec3)> = boundary.iter().map(|&p| (project(p), p)).collect();
+    let mut corners: Vec<((f64, f64), DVec3)> = boundary.iter().map(|&p| (project(p), p)).collect();
     let centroid = {
-        let sum = corners.iter().fold((0.0, 0.0), |acc, (p, _)| (acc.0 + p.0, acc.1 + p.1));
-        (sum.0 / corners.len() as f32, sum.1 / corners.len() as f32)
+        let sum = corners
+            .iter()
+            .fold((0.0, 0.0), |acc, (p, _)| (acc.0 + p.0, acc.1 + p.1));
+        (sum.0 / corners.len() as f64, sum.1 / corners.len() as f64)
     };
     corners.sort_by(|(a, _), (b, _)| {
         let ta = (a.1 - centroid.1).atan2(a.0 - centroid.0);
         let tb = (b.1 - centroid.1).atan2(b.0 - centroid.0);
         ta.partial_cmp(&tb).unwrap()
     });
-    let corners_2d: Vec<(f32, f32)> = corners.iter().map(|&(p, _)| p).collect();
-    let corners_3d: Vec<Vec3> = corners.iter().map(|&(_, p)| p).collect();
+    let corners_2d: Vec<(f64, f64)> = corners.iter().map(|&(p, _)| p).collect();
+    let corners_3d: Vec<DVec3> = corners.iter().map(|&(_, p)| p).collect();
     let boundary_2d = subdivide_boundary(&corners_2d, &corners_3d, target_spacing);
 
     let mut points_2d = boundary_2d.clone();
@@ -376,7 +396,7 @@ fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Ve
         index_of.insert((x64.to_bits(), y64.to_bits()), i);
     }
 
-    let points: Vec<Vec3> = points_2d.iter().map(|&p| unproject(p)).collect();
+    let points: Vec<DVec3> = points_2d.iter().map(|&p| unproject(p)).collect();
     // A triangle is considered degenerate (and dropped below) if its
     // longest-edge "height" -- the perpendicular distance from the third
     // vertex to the line through the other two -- is under this tolerance.
@@ -392,8 +412,8 @@ fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Ve
     // (rather than trying to coax the triangulator into never producing it)
     // is safe because, by construction, it contributes ~0 area -- the
     // remaining triangles already fully tile the polygon without it.
-    const DEGENERATE_TRIANGLE_HEIGHT_EPSILON: f32 = 1e-2;
-    let is_degenerate = |a: Vec3, b: Vec3, c: Vec3| -> bool {
+    const DEGENERATE_TRIANGLE_HEIGHT_EPSILON: f64 = 1e-2;
+    let is_degenerate = |a: DVec3, b: DVec3, c: DVec3| -> bool {
         let area2 = (b - a).cross(c - a).length();
         let longest_edge = (b - a).length().max((c - b).length()).max((a - c).length());
         if longest_edge < 1e-9 {
@@ -433,7 +453,11 @@ fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Ve
 /// an edge -- which reproject the same 3D endpoints through different bases
 /// -- always agree on how many segments that edge gets. See the comment in
 /// `triangulate_face` for why that agreement matters.
-fn subdivide_boundary(corners_ccw: &[(f32, f32)], corners_3d: &[Vec3], spacing: f32) -> Vec<(f32, f32)> {
+fn subdivide_boundary(
+    corners_ccw: &[(f64, f64)],
+    corners_3d: &[DVec3],
+    spacing: f64,
+) -> Vec<(f64, f64)> {
     if spacing <= 0.0 {
         return corners_ccw.to_vec();
     }
@@ -446,7 +470,7 @@ fn subdivide_boundary(corners_ccw: &[(f32, f32)], corners_3d: &[Vec3], spacing: 
         let edge_len = corners_3d[i].distance(corners_3d[(i + 1) % n]);
         let segments = (edge_len / spacing).round().max(1.0) as usize;
         for k in 1..segments {
-            let t = k as f32 / segments as f32;
+            let t = k as f64 / segments as f64;
             points.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
         }
     }
@@ -458,14 +482,26 @@ fn subdivide_boundary(corners_ccw: &[(f32, f32)], corners_3d: &[Vec3], spacing: 
 /// least half a spacing away from the boundary so the Delaunay
 /// triangulation doesn't produce slivers between interior and boundary
 /// vertices.
-fn sample_interior_points(boundary_ccw: &[(f32, f32)], spacing: f32) -> Vec<(f32, f32)> {
+fn sample_interior_points(boundary_ccw: &[(f64, f64)], spacing: f64) -> Vec<(f64, f64)> {
     let margin = spacing * 0.5;
-    let min_x = boundary_ccw.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-    let max_x = boundary_ccw.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-    let min_y = boundary_ccw.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-    let max_y = boundary_ccw.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+    let min_x = boundary_ccw
+        .iter()
+        .map(|p| p.0)
+        .fold(f64::INFINITY, f64::min);
+    let max_x = boundary_ccw
+        .iter()
+        .map(|p| p.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = boundary_ccw
+        .iter()
+        .map(|p| p.1)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = boundary_ccw
+        .iter()
+        .map(|p| p.1)
+        .fold(f64::NEG_INFINITY, f64::max);
 
-    let row_height = spacing * 0.75_f32.sqrt(); // sqrt(3)/2, for a triangular lattice
+    let row_height = spacing * 0.75_f64.sqrt(); // sqrt(3)/2, for a triangular lattice
     let mut points = vec![];
     let mut row = 0i32;
     let mut y = min_y;
@@ -486,7 +522,7 @@ fn sample_interior_points(boundary_ccw: &[(f32, f32)], spacing: f32) -> Vec<(f32
 
 /// True if `p` is inside `boundary_ccw` (a counterclockwise-ordered convex
 /// polygon) and at least `margin` away from every edge.
-fn inside_with_margin(boundary_ccw: &[(f32, f32)], p: (f32, f32), margin: f32) -> bool {
+fn inside_with_margin(boundary_ccw: &[(f64, f64)], p: (f64, f64), margin: f64) -> bool {
     let n = boundary_ccw.len();
     for i in 0..n {
         let a = boundary_ccw[i];
@@ -512,16 +548,16 @@ mod tests {
     use super::*;
     use shalrath::repr::{Brush, BrushPlane, Point, TrianglePlane};
 
-    fn point(x: f32, y: f32, z: f32) -> Point {
+    fn point(x: f64, y: f64, z: f64) -> Point {
         Point { x, y, z }
     }
 
     // Builds a plane from 3 points, flipping the winding order if needed so the
     // resulting normal points away from `centroid` (i.e. outward, as brush face
     // normals are expected to be).
-    fn plane_outward(v0: Point, v1: Point, v2: Point, centroid: Vec3) -> BrushPlane {
+    fn plane_outward(v0: Point, v1: Point, v2: Point, centroid: DVec3) -> BrushPlane {
         let normal = calculate_normal(TrianglePlane { v0, v1, v2 });
-        let (v0, v1, v2) = if normal.dot(vec3(v0) - centroid) < 0.0 {
+        let (v0, v1, v2) = if normal.dot(dvec3(v0) - centroid) < 0.0 {
             (v0, v2, v1)
         } else {
             (v0, v1, v2)
@@ -546,7 +582,7 @@ mod tests {
         // winding at all -- and therefore without risking the
         // culling/collision correctness the watertightness tests above
         // already cover.
-        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let centroid = DVec3::new(5.0, 5.0, 5.0);
         let planes = vec![
             plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
             plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
@@ -561,16 +597,16 @@ mod tests {
         let mesh_centroid = mesh
             .positions
             .iter()
-            .fold(Vec3::ZERO, |acc, p| acc + Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
+            .fold(DVec3::ZERO, |acc, p| acc + DVec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
             / mesh.positions.len() as f32;
 
         for face in &mesh.faces {
             for corner in &face.corners {
                 let normal_idx = corner.normal.expect("convert_to_mesh should bake an explicit normal for every corner");
                 let n = mesh.normals[normal_idx];
-                let n = Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32);
+                let n = DVec3::new(n[0] as f32, n[1] as f32, n[2] as f32);
                 let p = mesh.positions[corner.position];
-                let p = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+                let p = DVec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
                 assert!(
                     n.dot(p - mesh_centroid) > 0.0,
                     "baked normal {n:?} at vertex {p:?} doesn't point away from the mesh center"
@@ -583,14 +619,44 @@ mod tests {
     fn convert_to_mesh_handles_orthogonal_box() {
         // A plain axis-aligned box: every vertex is formed by 3 mutually
         // perpendicular faces, the one case the old angle-based gate handled.
-        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let centroid = DVec3::new(5.0, 5.0, 5.0);
         let planes = vec![
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
-            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
-            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 10.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 10.0),
+                point(10.0, 0.0, 10.0),
+                point(0.0, 10.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 10.0, 0.0),
+                point(0.0, 10.0, 10.0),
+                point(10.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                point(0.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(10.0, 0.0, 0.0),
+                point(10.0, 10.0, 0.0),
+                point(10.0, 0.0, 10.0),
+                centroid,
+            ),
         ];
         let brush = Brush::new(planes);
         let (mesh, _origin) = convert_to_mesh(&brush, 0.0);
@@ -605,26 +671,63 @@ mod tests {
 
     #[test]
     fn convert_to_mesh_returns_deterministic_origin_relative_to_a_brush_corner() {
-        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let centroid = DVec3::new(5.0, 5.0, 5.0);
         let planes = vec![
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
-            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
-            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 10.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 10.0),
+                point(10.0, 0.0, 10.0),
+                point(0.0, 10.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 10.0, 0.0),
+                point(0.0, 10.0, 10.0),
+                point(10.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                point(0.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(10.0, 0.0, 0.0),
+                point(10.0, 10.0, 0.0),
+                point(10.0, 0.0, 10.0),
+                centroid,
+            ),
         ];
         let brush = Brush::new(planes);
 
         let (mesh1, origin1) = convert_to_mesh(&brush, 0.0);
         let (_mesh2, origin2) = convert_to_mesh(&brush, 0.0);
-        assert_eq!(origin1, origin2, "origin should be deterministic across calls with the same brush");
+        assert_eq!(
+            origin1, origin2,
+            "origin should be deterministic across calls with the same brush"
+        );
 
         // The mesh is mirrored across the xz-plane on the way in, so the
         // origin should land on one of the box's corners with y negated.
-        let expected_corners: Vec<Vec3> = [0.0, 10.0]
+        let expected_corners: Vec<DVec3> = [0.0, 10.0]
             .into_iter()
-            .flat_map(|x| [0.0, -10.0].into_iter().flat_map(move |y| [0.0, 10.0].into_iter().map(move |z| Vec3::new(x, y, z))))
+            .flat_map(|x| {
+                [0.0, -10.0]
+                    .into_iter()
+                    .flat_map(move |y| [0.0, 10.0].into_iter().map(move |z| DVec3::new(x, y, z)))
+            })
             .collect();
         assert!(
             expected_corners.iter().any(|c| c.distance(origin1) < 1e-2),
@@ -634,7 +737,10 @@ mod tests {
         // Positions are relative to the origin, so the corner chosen as the
         // origin should itself show up as a mesh vertex at (0, 0, 0).
         assert!(
-            mesh1.positions.iter().any(|p| p[0].abs() < 1e-2 && p[1].abs() < 1e-2 && p[2].abs() < 1e-2),
+            mesh1
+                .positions
+                .iter()
+                .any(|p| p[0].abs() < 1e-2 && p[1].abs() < 1e-2 && p[2].abs() < 1e-2),
             "expected a mesh vertex at the origin (0, 0, 0), got {:?}",
             mesh1.positions
         );
@@ -649,7 +755,7 @@ mod tests {
         // The old angle-based gate could only ever find the 2 vertices where
         // the hypotenuse face isn't involved; it would silently drop the other
         // 4 vertices of the shape.
-        let centroid = Vec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0);
+        let centroid = DVec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0);
         let a = point(0.0, 0.0, 0.0);
         let b = point(10.0, 0.0, 0.0);
         let c = point(0.0, 10.0, 0.0);
@@ -678,14 +784,44 @@ mod tests {
     fn convert_to_mesh_subdivides_faces_with_small_spacing() {
         // Same box as above, but with a spacing small enough that each
         // 10x10 face should get extra interior vertices.
-        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let centroid = DVec3::new(5.0, 5.0, 5.0);
         let planes = vec![
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
-            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
-            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 10.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 10.0),
+                point(10.0, 0.0, 10.0),
+                point(0.0, 10.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 10.0, 0.0),
+                point(0.0, 10.0, 10.0),
+                point(10.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                point(0.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(10.0, 0.0, 0.0),
+                point(10.0, 10.0, 0.0),
+                point(10.0, 0.0, 10.0),
+                centroid,
+            ),
         ];
         let brush = Brush::new(planes);
 
@@ -704,13 +840,13 @@ mod tests {
         // A convex pentagon with no interior subdivision requested: point
         // count and triangle count should match a plain fan/ear-clip of the
         // boundary (n vertices -> n-2 triangles), just via Delaunay instead.
-        let normal = Vec3::Z;
+        let normal = DVec3::Z;
         let boundary = vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(4.0, 0.0, 0.0),
-            Vec3::new(5.0, 3.0, 0.0),
-            Vec3::new(2.0, 5.0, 0.0),
-            Vec3::new(-1.0, 3.0, 0.0),
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(4.0, 0.0, 0.0),
+            DVec3::new(5.0, 3.0, 0.0),
+            DVec3::new(2.0, 5.0, 0.0),
+            DVec3::new(-1.0, 3.0, 0.0),
         ];
         let (points, triangles) = triangulate_face(normal, &boundary, 0.0);
 
@@ -720,12 +856,12 @@ mod tests {
 
     #[test]
     fn triangulate_face_adds_interior_points_and_stays_outward_wound() {
-        let normal = Vec3::Z;
+        let normal = DVec3::Z;
         let boundary = vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(10.0, 0.0, 0.0),
-            Vec3::new(10.0, 10.0, 0.0),
-            Vec3::new(0.0, 10.0, 0.0),
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(10.0, 0.0, 0.0),
+            DVec3::new(10.0, 10.0, 0.0),
+            DVec3::new(0.0, 10.0, 0.0),
         ];
         let (points, triangles) = triangulate_face(normal, &boundary, 2.0);
 
@@ -735,7 +871,10 @@ mod tests {
 
         for [a, b, c] in triangles {
             let tri_normal = (points[b] - points[a]).cross(points[c] - points[a]);
-            assert!(tri_normal.dot(normal) > 0.0, "triangle wound inward relative to face normal");
+            assert!(
+                tri_normal.dot(normal) > 0.0,
+                "triangle wound inward relative to face normal"
+            );
         }
     }
 
@@ -744,7 +883,10 @@ mod tests {
         // A 10x10 square with 3-unit spacing: each 10-unit edge should be
         // split into round(10/3) = 3 segments, i.e. 2 extra points per edge.
         let corners = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
-        let corners_3d: Vec<Vec3> = corners.iter().map(|&(x, y)| Vec3::new(x, y, 0.0)).collect();
+        let corners_3d: Vec<DVec3> = corners
+            .iter()
+            .map(|&(x, y)| DVec3::new(x, y, 0.0))
+            .collect();
         let subdivided = subdivide_boundary(&corners, &corners_3d, 3.0);
 
         assert_eq!(subdivided.len(), corners.len() * 3);
@@ -758,7 +900,10 @@ mod tests {
     #[test]
     fn subdivide_boundary_is_a_no_op_for_non_positive_spacing() {
         let corners = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
-        let corners_3d: Vec<Vec3> = corners.iter().map(|&(x, y)| Vec3::new(x, y, 0.0)).collect();
+        let corners_3d: Vec<DVec3> = corners
+            .iter()
+            .map(|&(x, y)| DVec3::new(x, y, 0.0))
+            .collect();
         assert_eq!(subdivide_boundary(&corners, &corners_3d, 0.0), corners);
     }
 
@@ -769,17 +914,17 @@ mod tests {
         // and much shorter edges connecting to the dense interior lattice,
         // producing thin slivers. With boundary subdivision, no triangle
         // edge should be much longer than the requested spacing.
-        let normal = Vec3::Z;
+        let normal = DVec3::Z;
         let boundary = vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(20.0, 0.0, 0.0),
-            Vec3::new(20.0, 20.0, 0.0),
-            Vec3::new(0.0, 20.0, 0.0),
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(20.0, 0.0, 0.0),
+            DVec3::new(20.0, 20.0, 0.0),
+            DVec3::new(0.0, 20.0, 0.0),
         ];
         let spacing = 3.0;
         let (points, triangles) = triangulate_face(normal, &boundary, spacing);
 
-        let mut max_edge_len: f32 = 0.0;
+        let mut max_edge_len: f64 = 0.0;
         for [a, b, c] in &triangles {
             for (i, j) in [(*a, *b), (*b, *c), (*c, *a)] {
                 max_edge_len = max_edge_len.max(points[i].distance(points[j]));
@@ -787,7 +932,10 @@ mod tests {
         }
         // A generous bound: the longest edge (e.g. a lattice-row diagonal)
         // shouldn't be more than double the requested spacing.
-        assert!(max_edge_len <= spacing * 2.0, "found a sliver-length edge: {max_edge_len}");
+        assert!(
+            max_edge_len <= spacing * 2.0,
+            "found a sliver-length edge: {max_edge_len}"
+        );
     }
 
     #[test]
@@ -813,8 +961,12 @@ mod tests {
         weld_vertices(&mut mesh, WELD_EPSILON);
 
         assert_eq!(mesh.positions.len(), 2);
-        let corner_positions: Vec<usize> = mesh.faces[0].corners.iter().map(|c| c.position).collect();
-        assert_eq!(corner_positions[0], corner_positions[2], "the two close vertices should have welded to the same index");
+        let corner_positions: Vec<usize> =
+            mesh.faces[0].corners.iter().map(|c| c.position).collect();
+        assert_eq!(
+            corner_positions[0], corner_positions[2],
+            "the two close vertices should have welded to the same index"
+        );
         assert_ne!(corner_positions[0], corner_positions[1]);
     }
 
@@ -823,18 +975,48 @@ mod tests {
         // Any closed brush mesh should be watertight: every edge shared by
         // exactly two triangles. Checked across a right-angle box, a
         // non-orthogonal wedge, and a subdivided box.
-        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let centroid = DVec3::new(5.0, 5.0, 5.0);
         let box_planes = vec![
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
-            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
-            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 10.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 10.0),
+                point(10.0, 0.0, 10.0),
+                point(0.0, 10.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 10.0, 0.0),
+                point(0.0, 10.0, 10.0),
+                point(10.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                point(0.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(10.0, 0.0, 0.0),
+                point(10.0, 10.0, 0.0),
+                point(10.0, 0.0, 10.0),
+                centroid,
+            ),
         ];
         let box_brush = Brush::new(box_planes);
 
-        let wedge_centroid = Vec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0);
+        let wedge_centroid = DVec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0);
         let a = point(0.0, 0.0, 0.0);
         let b = point(10.0, 0.0, 0.0);
         let c = point(0.0, 10.0, 0.0);
@@ -853,7 +1035,10 @@ mod tests {
         for (brush, spacing) in [(&box_brush, 0.0), (&box_brush, 3.0), (&wedge_brush, 0.0)] {
             let (mesh, _origin) = convert_to_mesh(brush, spacing);
             let boundary_edges = find_boundary_edges(&mesh);
-            assert!(boundary_edges.is_empty(), "found holes/non-manifold edges: {boundary_edges:?}");
+            assert!(
+                boundary_edges.is_empty(),
+                "found holes/non-manifold edges: {boundary_edges:?}"
+            );
         }
     }
 
@@ -891,12 +1076,16 @@ mod tests {
 }
 }
 "#;
-        let (_, ast) = shalrath::parser::repr::parse_map(MAP.trim()).expect("parse embedded test map");
+        let (_, ast) =
+            shalrath::parser::repr::parse_map(MAP.trim()).expect("parse embedded test map");
         for ent in ast.0 {
             for brush in ent.brushes.0.iter() {
                 let (mesh, _origin) = convert_to_mesh(brush, 64.0);
                 let boundary_edges = find_boundary_edges(&mesh);
-                assert!(boundary_edges.is_empty(), "found holes/non-manifold edges: {boundary_edges:?}");
+                assert!(
+                    boundary_edges.is_empty(),
+                    "found holes/non-manifold edges: {boundary_edges:?}"
+                );
             }
         }
     }
@@ -910,8 +1099,8 @@ mod tests {
         // two faces meeting at such an edge could round to a different
         // segment count due to a few ULPs of noise from each face's own 2D
         // reprojection, leaving a hole that welding couldn't fix.
-        let s = 9.6_f32; // 10 * 9.6 = 96 = 1.5 * 64
-        let wedge_centroid = Vec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0) * s;
+        let s = 9.6_f64; // 10 * 9.6 = 96 = 1.5 * 64
+        let wedge_centroid = DVec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0) * s;
         let a = point(0.0, 0.0, 0.0);
         let b = point(10.0 * s, 0.0, 0.0);
         let c = point(0.0, 10.0 * s, 0.0);
@@ -928,7 +1117,10 @@ mod tests {
         let wedge_brush = Brush::new(wedge_planes);
         let (mesh, _origin) = convert_to_mesh(&wedge_brush, 64.0);
         let boundary_edges = find_boundary_edges(&mesh);
-        assert!(boundary_edges.is_empty(), "found holes/non-manifold edges: {boundary_edges:?}");
+        assert!(
+            boundary_edges.is_empty(),
+            "found holes/non-manifold edges: {boundary_edges:?}"
+        );
     }
 
     #[test]
@@ -937,14 +1129,44 @@ mod tests {
         // near-duplicate (but not identical) positions: before welding,
         // adjacent faces reconstructed their shared edge's vertices
         // independently and landed a few float32-ULPs apart.
-        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let centroid = DVec3::new(5.0, 5.0, 5.0);
         let planes = vec![
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
-            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
-            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 10.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 10.0),
+                point(10.0, 0.0, 10.0),
+                point(0.0, 10.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 10.0, 0.0),
+                point(0.0, 10.0, 10.0),
+                point(10.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                point(0.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(10.0, 0.0, 0.0),
+                point(10.0, 10.0, 0.0),
+                point(10.0, 0.0, 10.0),
+                centroid,
+            ),
         ];
         let brush = Brush::new(planes);
         let (mesh, _origin) = convert_to_mesh(&brush, 3.0);
@@ -953,8 +1175,12 @@ mod tests {
             for j in (i + 1)..mesh.positions.len() {
                 let a = mesh.positions[i];
                 let b = mesh.positions[j];
-                let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
-                assert!(d >= WELD_EPSILON, "found an unwelded near-duplicate vertex pair at distance {d:e}");
+                let d =
+                    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+                assert!(
+                    d >= WELD_EPSILON,
+                    "found an unwelded near-duplicate vertex pair at distance {d:e}"
+                );
             }
         }
     }
