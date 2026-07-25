@@ -549,7 +549,7 @@ mod tests {
     use shalrath::repr::{Brush, BrushPlane, Point, TrianglePlane};
 
     fn point(x: f64, y: f64, z: f64) -> Point {
-        Point { x, y, z }
+        Point { x: x as f32, y: y as f32, z: z as f32 }
     }
 
     // Builds a plane from 3 points, flipping the winding order if needed so the
@@ -597,16 +597,16 @@ mod tests {
         let mesh_centroid = mesh
             .positions
             .iter()
-            .fold(DVec3::ZERO, |acc, p| acc + DVec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
-            / mesh.positions.len() as f32;
+            .fold(DVec3::ZERO, |acc, p| acc + DVec3::new(p[0], p[1], p[2]))
+            / mesh.positions.len() as f64;
 
         for face in &mesh.faces {
             for corner in &face.corners {
                 let normal_idx = corner.normal.expect("convert_to_mesh should bake an explicit normal for every corner");
                 let n = mesh.normals[normal_idx];
-                let n = DVec3::new(n[0] as f32, n[1] as f32, n[2] as f32);
+                let n = DVec3::new(n[0], n[1], n[2]);
                 let p = mesh.positions[corner.position];
-                let p = DVec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+                let p = DVec3::new(p[0], p[1], p[2]);
                 assert!(
                     n.dot(p - mesh_centroid) > 0.0,
                     "baked normal {n:?} at vertex {p:?} doesn't point away from the mesh center"
