@@ -12,3 +12,4 @@ pseudocooker = { path = "pseudocooker" }
 glam = "0.33.2"
 itertools = "0.15.0"
 spade = "2.15.1"
+humansize = "2.1.3"

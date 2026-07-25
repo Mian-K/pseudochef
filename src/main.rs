@@ -1,7 +1,7 @@
 use shalrath::parser::repr::parse_map;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::reader::ArchiveTrait;
@@ -221,7 +221,6 @@ fn process_brush<C: Read + Seek, W: Write + Seek>(
     .expect("failed to write uasset to pak");
     pak.write_file(&format!("Mods/Maps/slop/{}.uexp", name), true, &cooked.uexp)
         .expect("failed to write uasset to pak");
-    println!("cooked {}", name);
 
     let new_import_idx = {
         let idx1 = find_import(umap, "Package", "/Game/Mods/Maps/mise/SM_ExampleBox").unwrap();
@@ -312,11 +311,14 @@ fn main() {
             None,
         );
 
+    let start = Instant::now();
     for ent in ast.0 {
         for (i, brush) in ent.brushes.0.iter().enumerate() {
             process_brush(&mut umap, &mut pak, i, brush);
         }
     }
+    let elapsed = start.elapsed();
+    println!("mesh generation completed in {}ms", elapsed.as_millis());
 
     // rename level export (for swag only; seemingly inconsequential)
     {
@@ -326,15 +328,13 @@ fn main() {
         export.get_base_export_mut().object_name = fname;
     }
 
-    // TODO generate obj files and write them to the umap and the pak
-
     let mut final_umap = std::io::Cursor::new(vec![]);
     let mut final_uexp = std::io::Cursor::new(vec![]);
     umap.write_data(&mut final_umap, Some(&mut final_uexp))
         .expect("failed to serialize umap");
 
-    std::fs::write("slop.umap", final_umap.get_ref()).unwrap();
-    std::fs::write("slop.uexp", final_uexp.get_ref()).unwrap();
+    //std::fs::write("slop.umap", final_umap.get_ref()).unwrap();
+    //std::fs::write("slop.uexp", final_uexp.get_ref()).unwrap();
 
     // TODO also rename mise export
     pak.write_file("Mods/Maps/slop.umap", true, final_umap.get_ref())
@@ -347,5 +347,14 @@ fn main() {
         pak.write_file(&path, true, bytes)
             .expect(&format!("failed to write {} to pak", name));
     }
-    pak.write_index().unwrap();
+
+    let mut writer = pak.write_index().expect("failed to write pak file");
+    let bytes_written = writer
+        .stream_position()
+        .expect("failed to seek in pak file");
+    println!(
+        "wrote {} to \"{}\"",
+        humansize::format_size(bytes_written, humansize::DECIMAL),
+        args[2]
+    );
 }
