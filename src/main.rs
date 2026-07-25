@@ -6,12 +6,7 @@ use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::reader::ArchiveTrait;
 
 mod brush_to_mesh;
-// Not called from the pipeline yet; used ad hoc (e.g. from a debugger or a
-// scratch `main`) to dump a `MeshInput` for visual inspection in Blender.
-#[allow(dead_code)]
-mod obj_export;
 use brush_to_mesh::convert_to_mesh;
-use obj_export::write_obj_file;
 
 const MISE_UMAP: &[u8] = include_bytes!("mise.umap");
 const MISE_UEXP: &[u8] = include_bytes!("mise.uexp");
@@ -147,12 +142,6 @@ fn main() {
         for brush in &ent.brushes.0 {
             let mesh = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
             let name = format!("tb{}", i);
-            {
-                // tmp for debugging
-                let name = format!("tb{}.obj", i);
-                let path = std::path::Path::new(&name);
-                write_obj_file(&mesh, &path).unwrap();
-            }
             let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
             pak.write_file(
                 &format!("Mods/Maps/slop/{}.uasset", name),
