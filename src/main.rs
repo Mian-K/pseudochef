@@ -8,12 +8,16 @@ use unreal_asset::reader::ArchiveTrait;
 mod brush_to_mesh;
 use brush_to_mesh::convert_to_mesh;
 
+// For debugging purposes; may not be called
+#[allow(dead_code)]
+mod obj_export;
+
 const MISE_UMAP: &[u8] = include_bytes!("mise.umap");
 const MISE_UEXP: &[u8] = include_bytes!("mise.uexp");
 // World-space (map-unit) spacing between generated interior face vertices;
 // see `brush_to_mesh::convert_to_mesh`. Smaller values give smoother
 // per-vertex lighting at the cost of more geometry.
-const FACE_VERTEX_SPACING: f32 = 32.0;
+const FACE_VERTEX_SPACING: f32 = 64.0;
 
 fn default_opts() -> pseudocooker::CookOptions {
     pseudocooker::CookOptions {
@@ -131,15 +135,15 @@ fn main() {
 
     let (_, ast) = parse_map(&map_contents).expect("failed to parse map file");
 
-    let mut pak = repak::PakBuilder::new().writer(
+    let mut pak = repak::PakBuilder::new().compression(vec![repak::Compression::Zlib]).writer(
         File::create(&args[2]).unwrap(),
         repak::Version::V11,
         "../../../pseudoregalia/Content/".to_string(),
         None,
     );
 
-    for (i, ent) in ast.0.iter().enumerate() {
-        for brush in &ent.brushes.0 {
+    for ent in ast.0 {
+        for (i, brush) in ent.brushes.0.iter().enumerate() {
             let mesh = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
             let name = format!("tb{}", i);
             let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
