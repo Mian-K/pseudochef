@@ -156,7 +156,35 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
     // rather than bit-identical. Weld them so the mesh is actually
     // watertight instead of having micro-cracks along every brush edge.
     weld_vertices(&mut mesh, WELD_EPSILON);
+    let boundary_edges = find_boundary_edges(&mesh);
+    debug_assert!(
+        boundary_edges.is_empty(),
+        "generated mesh has holes/non-manifold edges: {boundary_edges:?}"
+    );
     mesh
+}
+
+/// Returns every edge that isn't shared by exactly two triangles: for a
+/// closed, watertight mesh built from a convex brush, each edge should be
+/// used once by each of the two faces that meet there. An edge used only
+/// once is a hole (or a crack left by an unwelded vertex); an edge used more
+/// than twice indicates overlapping/degenerate triangles.
+fn find_boundary_edges(mesh: &pseudocooker::MeshInput) -> Vec<(usize, usize)> {
+    let mut edge_counts: HashMap<(usize, usize), u32> = HashMap::new();
+    for face in &mesh.faces {
+        let n = face.corners.len();
+        for i in 0..n {
+            let a = face.corners[i].position;
+            let b = face.corners[(i + 1) % n].position;
+            let edge = if a < b { (a, b) } else { (b, a) };
+            *edge_counts.entry(edge).or_insert(0) += 1;
+        }
+    }
+    edge_counts
+        .into_iter()
+        .filter(|&(_, count)| count != 2)
+        .map(|(edge, _)| edge)
+        .collect()
 }
 
 // World-space distance below which two vertices are considered the same
@@ -601,6 +629,45 @@ mod tests {
         let corner_positions: Vec<usize> = mesh.faces[0].corners.iter().map(|c| c.position).collect();
         assert_eq!(corner_positions[0], corner_positions[2], "the two close vertices should have welded to the same index");
         assert_ne!(corner_positions[0], corner_positions[1]);
+    }
+
+    #[test]
+    fn convert_to_mesh_has_no_boundary_edges() {
+        // Any closed brush mesh should be watertight: every edge shared by
+        // exactly two triangles. Checked across a right-angle box, a
+        // non-orthogonal wedge, and a subdivided box.
+        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let box_planes = vec![
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
+            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
+            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+        ];
+        let box_brush = Brush::new(box_planes);
+
+        let wedge_centroid = Vec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0);
+        let a = point(0.0, 0.0, 0.0);
+        let b = point(10.0, 0.0, 0.0);
+        let c = point(0.0, 10.0, 0.0);
+        let a2 = point(0.0, 0.0, 10.0);
+        let b2 = point(10.0, 0.0, 10.0);
+        let c2 = point(0.0, 10.0, 10.0);
+        let wedge_planes = vec![
+            plane_outward(a, b, c, wedge_centroid),
+            plane_outward(a2, c2, b2, wedge_centroid),
+            plane_outward(a, a2, b2, wedge_centroid),
+            plane_outward(a, c, c2, wedge_centroid),
+            plane_outward(b, b2, c2, wedge_centroid),
+        ];
+        let wedge_brush = Brush::new(wedge_planes);
+
+        for (brush, spacing) in [(&box_brush, 0.0), (&box_brush, 3.0), (&wedge_brush, 0.0)] {
+            let mesh = convert_to_mesh(brush, spacing);
+            let boundary_edges = find_boundary_edges(&mesh);
+            assert!(boundary_edges.is_empty(), "found holes/non-manifold edges: {boundary_edges:?}");
+        }
     }
 
     #[test]
