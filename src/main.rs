@@ -144,7 +144,7 @@ fn main() {
 
     for ent in ast.0 {
         for (i, brush) in ent.brushes.0.iter().enumerate() {
-            let mesh = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
+            let (mesh, _origin) = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
             let name = format!("tb{}", i);
             let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
             pak.write_file(

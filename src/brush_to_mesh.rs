@@ -35,7 +35,15 @@ fn mirror_xz(brush: &shalrath::repr::Brush) -> shalrath::repr::Brush {
 /// brushes meet). A value <= 0.0 disables subdivision, leaving each face as
 /// just its original corners (still Delaunay-triangulated, unlike the old
 /// vertex-fan).
-pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32) -> pseudocooker::MeshInput {
+///
+/// Returns the mesh together with the world-space `origin` it's relative to:
+/// a deterministically-chosen brush vertex (one of the plane intersections,
+/// not a subdivided/interior point), so that placing the mesh at `origin` in
+/// the world reproduces its original position. Positions in the returned
+/// mesh are all relative to this origin rather than world-space, which keeps
+/// the mesh's own coordinates small and independent of where the brush sits
+/// in the map.
+pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32) -> (pseudocooker::MeshInput, Vec3) {
     // TrenchBroom uses a right-handed coordinate system with +z pointing up.
     // Unreal uses a left-handed coordinate system with +z pointing up.
     // So, we mirror across the xz-plane when converting.
@@ -123,6 +131,18 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
         }
     }
 
+    // Pick a deterministic brush vertex (a real plane intersection, not a
+    // subdivided or interior-sampled point) to serve as the mesh's origin.
+    // Combinations are visited in a fixed order and float ops are
+    // deterministic, so this always picks the same corner for the same
+    // brush; lexicographic order is an arbitrary but stable tie-break.
+    let origin = vertices
+        .iter()
+        .flatten()
+        .copied()
+        .min_by(|a, b| (a.x, a.y, a.z).partial_cmp(&(b.x, b.y, b.z)).unwrap())
+        .expect("a convex brush has at least one vertex");
+
     let mut positions = vec![];
     let mut faces = vec![];
     for (normal, face_vertices) in normals.iter().zip(vertices.iter()) {
@@ -161,7 +181,14 @@ pub fn convert_to_mesh(brush: &shalrath::repr::Brush, target_vertex_spacing: f32
         boundary_edges.is_empty(),
         "generated mesh has holes/non-manifold edges: {boundary_edges:?}"
     );
-    mesh
+
+    for p in &mut mesh.positions {
+        p[0] -= origin.x as f64;
+        p[1] -= origin.y as f64;
+        p[2] -= origin.z as f64;
+    }
+
+    (mesh, origin)
 }
 
 /// Returns every edge that isn't shared by exactly two triangles: for a
@@ -445,7 +472,7 @@ mod tests {
             plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
         ];
         let brush = Brush::new(planes);
-        let mesh = convert_to_mesh(&brush, 0.0);
+        let (mesh, _origin) = convert_to_mesh(&brush, 0.0);
 
         // 6 quad faces, triangulated into 2 triangles each (no interior
         // subdivision requested, so this is just the boundary triangulation).
@@ -453,6 +480,43 @@ mod tests {
         for p in &mesh.positions {
             assert!(p.iter().all(|c| c.is_finite()));
         }
+    }
+
+    #[test]
+    fn convert_to_mesh_returns_deterministic_origin_relative_to_a_brush_corner() {
+        let centroid = Vec3::new(5.0, 5.0, 5.0);
+        let planes = vec![
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
+            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
+            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
+            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+        ];
+        let brush = Brush::new(planes);
+
+        let (mesh1, origin1) = convert_to_mesh(&brush, 0.0);
+        let (_mesh2, origin2) = convert_to_mesh(&brush, 0.0);
+        assert_eq!(origin1, origin2, "origin should be deterministic across calls with the same brush");
+
+        // The mesh is mirrored across the xz-plane on the way in, so the
+        // origin should land on one of the box's corners with y negated.
+        let expected_corners: Vec<Vec3> = [0.0, 10.0]
+            .into_iter()
+            .flat_map(|x| [0.0, -10.0].into_iter().flat_map(move |y| [0.0, 10.0].into_iter().map(move |z| Vec3::new(x, y, z))))
+            .collect();
+        assert!(
+            expected_corners.iter().any(|c| c.distance(origin1) < 1e-2),
+            "origin {origin1:?} should coincide with one of the box's corners"
+        );
+
+        // Positions are relative to the origin, so the corner chosen as the
+        // origin should itself show up as a mesh vertex at (0, 0, 0).
+        assert!(
+            mesh1.positions.iter().any(|p| p[0].abs() < 1e-2 && p[1].abs() < 1e-2 && p[2].abs() < 1e-2),
+            "expected a mesh vertex at the origin (0, 0, 0), got {:?}",
+            mesh1.positions
+        );
     }
 
     #[test]
@@ -480,7 +544,7 @@ mod tests {
             plane_outward(b, b2, c2, centroid),  // hypotenuse side face along BC
         ];
         let brush = Brush::new(planes);
-        let mesh = convert_to_mesh(&brush, 0.0);
+        let (mesh, _origin) = convert_to_mesh(&brush, 0.0);
 
         // 2 triangular caps (1 tri each) + 3 rectangular sides (2 tris each).
         assert_eq!(mesh.faces.len(), 8);
@@ -504,8 +568,8 @@ mod tests {
         ];
         let brush = Brush::new(planes);
 
-        let coarse = convert_to_mesh(&brush, 0.0);
-        let fine = convert_to_mesh(&brush, 3.0);
+        let (coarse, _coarse_origin) = convert_to_mesh(&brush, 0.0);
+        let (fine, _fine_origin) = convert_to_mesh(&brush, 3.0);
 
         assert!(fine.positions.len() > coarse.positions.len());
         assert!(fine.faces.len() > coarse.faces.len());
@@ -664,7 +728,7 @@ mod tests {
         let wedge_brush = Brush::new(wedge_planes);
 
         for (brush, spacing) in [(&box_brush, 0.0), (&box_brush, 3.0), (&wedge_brush, 0.0)] {
-            let mesh = convert_to_mesh(brush, spacing);
+            let (mesh, _origin) = convert_to_mesh(brush, spacing);
             let boundary_edges = find_boundary_edges(&mesh);
             assert!(boundary_edges.is_empty(), "found holes/non-manifold edges: {boundary_edges:?}");
         }
@@ -686,7 +750,7 @@ mod tests {
             plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
         ];
         let brush = Brush::new(planes);
-        let mesh = convert_to_mesh(&brush, 3.0);
+        let (mesh, _origin) = convert_to_mesh(&brush, 3.0);
 
         for i in 0..mesh.positions.len() {
             for j in (i + 1)..mesh.positions.len() {
