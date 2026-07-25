@@ -286,6 +286,16 @@ fn weld_vertices(mesh: &mut pseudocooker::MeshInput, epsilon: f64) {
 /// to interior ones instead of being long slivers -- important since that's
 /// exactly where adjacent brushes meet.
 ///
+/// One wrinkle: boundary subdivision deliberately places points exactly on
+/// the straight line between the corners they subdivide, and `spade`'s
+/// Delaunay triangulation isn't numerically stable for such near-collinear
+/// input -- it can emit a spurious near-zero-area sliver triangle across a
+/// corner and one of its own subdivision points, *in addition to* an
+/// already-complete, correct triangulation of the rest of the polygon. That
+/// extra triangle's edges don't correspond to real brush geometry and never
+/// get matched by a neighboring triangle, leaving a hole. See the
+/// `is_degenerate` filter below, which drops such triangles.
+///
 /// Returns the (deduplicated) points used -- boundary corners and edge
 /// subdivisions first, in polygon order, followed by any generated interior
 /// points -- and a list of triangles as indices into that point list.
@@ -349,6 +359,30 @@ fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Ve
     }
 
     let points: Vec<Vec3> = points_2d.iter().map(|&p| unproject(p)).collect();
+    // A triangle is considered degenerate (and dropped below) if its
+    // longest-edge "height" -- the perpendicular distance from the third
+    // vertex to the line through the other two -- is under this tolerance.
+    // Boundary subdivision places points exactly on the straight line
+    // between the corners they subdivide, and spade's Delaunay
+    // triangulation isn't numerically stable for such near-collinear input:
+    // it can emit a spurious near-zero-area triangle straddling a corner
+    // and one of its own subdivision points, *in addition to* (not instead
+    // of) a full, correct, gapless triangulation of the rest of the
+    // polygon. That extra triangle's edges don't correspond to any real
+    // brush geometry and never get matched by a neighboring triangle,
+    // leaving the watertightness check with a hole. Filtering it out here
+    // (rather than trying to coax the triangulator into never producing it)
+    // is safe because, by construction, it contributes ~0 area -- the
+    // remaining triangles already fully tile the polygon without it.
+    const DEGENERATE_TRIANGLE_HEIGHT_EPSILON: f32 = 1e-2;
+    let is_degenerate = |a: Vec3, b: Vec3, c: Vec3| -> bool {
+        let area2 = (b - a).cross(c - a).length();
+        let longest_edge = (b - a).length().max((c - b).length()).max((a - c).length());
+        if longest_edge < 1e-9 {
+            return true;
+        }
+        area2 / longest_edge < DEGENERATE_TRIANGLE_HEIGHT_EPSILON
+    };
     let triangles: Vec<[usize; 3]> = triangulation
         .inner_faces()
         .map(|face| {
@@ -363,6 +397,7 @@ fn triangulate_face(normal: Vec3, boundary: &[Vec3], target_spacing: f32) -> (Ve
                 [a, b, c]
             }
         })
+        .filter(|&[a, b, c]| !is_degenerate(points[a], points[b], points[c]))
         .collect();
 
     (points, triangles)
@@ -754,6 +789,50 @@ mod tests {
             let (mesh, _origin) = convert_to_mesh(brush, spacing);
             let boundary_edges = find_boundary_edges(&mesh);
             assert!(boundary_edges.is_empty(), "found holes/non-manifold edges: {boundary_edges:?}");
+        }
+    }
+
+    #[test]
+    fn convert_to_mesh_has_no_boundary_edges_for_reported_repro_brushes() {
+        // Regression test for a user-reported repro: at production spacing
+        // (64.0), both brushes here used to leave the watertightness check
+        // with a hole. The cause was a spade Delaunay triangulation quirk:
+        // boundary subdivision places points exactly on the straight line
+        // between the corners they subdivide, and the triangulator isn't
+        // numerically stable for such near-collinear input -- it could
+        // insert a spurious near-zero-area triangle spanning a corner and
+        // one of its own subdivision points, *on top of* an already-correct
+        // and gapless triangulation of the rest of the face, leaving that
+        // extra triangle's edges unmatched. See `triangulate_face`'s
+        // `is_degenerate` filter, which drops such triangles.
+        const MAP: &str = r#"
+{
+"classname" "worldspawn"
+{
+( 16 0 -96 ) ( 15.666666666666668 1 -95.8095238095238 ) ( 20 0 -93.85714285714286 ) __TB_empty 14.399982 24.005892 108.43492 1.0540923 -7728.329
+( 144 96 -16 ) ( 143.66666666666669 97 -15.809523809523817 ) ( 145 96 -15.714285714285715 ) __TB_empty -16 -12.594524 0 0.99999994 1.3557225
+( 16 0 -96 ) ( 20 0 -93.85714285714286 ) ( 17 0 -95.7142857142857 ) __TB_empty -7.547184 21.158709 15.9453945 1.0400156 31.327183
+( 144 96 -16 ) ( 145 96 -15.714285714285715 ) ( 148 96 -13.857142857142854 ) __TB_empty 17.207546 -9.999427 15.9453945 1.0400156 31.327183
+( 16 0 -96 ) ( 17 0 -95.7142857142857 ) ( 15.666666666666668 1 -95.8095238095238 ) __TB_empty -16 -12.594524 0 0.99999994 1.3557225
+( 144 96 -16 ) ( 148 96 -13.857142857142854 ) ( 143.66666666666669 97 -15.809523809523817 ) __TB_empty 11.199934 24.017677 108.43492 1.0540923 -7728.329
+}
+{
+( 48 -48 -32 ) ( 53 -50 -31 ) ( 49 -48.333333333333314 -32 ) __TB_empty -8 23.948685 0 1.0000006 467.69745
+( 48 -48 -32 ) ( 48 -47 -32 ) ( 53 -50 -31 ) __TB_empty 0 -6.050085 90 1 -45.130215
+( 48 -48 -32 ) ( 49 -48.333333333333314 -32 ) ( 48 -47 -32 ) __TB_empty 4.7999954 -0.399621 341.56506 1.0540925 0.9729834
+( 224 -16 -16 ) ( 224 -15 -16 ) ( 225 -16.333333333333314 -16 ) __TB_empty -12.800003 -5.5997744 341.56506 1.0540925 0.9729834
+( 224 -16 -16 ) ( 229 -18 -15 ) ( 224 -15 -16 ) __TB_empty 0 -3.9229012 90 1 -45.130215
+( 224 -16 -16 ) ( 225 -16.333333333333314 -16 ) ( 229 -18 -15 ) __TB_empty -8 -8.051315 0 1.0000006 467.69745
+}
+}
+"#;
+        let (_, ast) = shalrath::parser::repr::parse_map(MAP.trim()).expect("parse embedded test map");
+        for ent in ast.0 {
+            for brush in ent.brushes.0.iter() {
+                let (mesh, _origin) = convert_to_mesh(brush, 64.0);
+                let boundary_edges = find_boundary_edges(&mesh);
+                assert!(boundary_edges.is_empty(), "found holes/non-manifold edges: {boundary_edges:?}");
+            }
         }
     }
 
