@@ -186,10 +186,10 @@ pub fn convert_to_mesh(
     for (i, (normal, face_vertices)) in normals.iter().zip(vertices.iter()).enumerate() {
         let base = positions.len();
         let (points, triangles) = triangulate_face(*normal, face_vertices, target_vertex_spacing);
-        positions.extend(points.iter().map(|p| [p.x as f64, p.y as f64, p.z as f64]));
+        positions.extend(points.iter().map(|p| [p.x, p.y, p.z]));
         let n = true_outward_normals[i].normalize();
         let normal_index = mesh_normals.len();
-        mesh_normals.push([n.x as f64, n.y as f64, n.z as f64]);
+        mesh_normals.push([n.x, n.y, n.z]);
         for [a, b, c] in triangles {
             // TODO unhardcode material_index; would need to pass in whole entity, not just brush
             faces.push(pseudocooker::Face {
@@ -224,9 +224,9 @@ pub fn convert_to_mesh(
     );
 
     for p in &mut mesh.positions {
-        p[0] -= origin.x as f64;
-        p[1] -= origin.y as f64;
-        p[2] -= origin.z as f64;
+        p[0] -= origin.x;
+        p[1] -= origin.y;
+        p[2] -= origin.z;
     }
 
     (mesh, origin)
