@@ -72,29 +72,22 @@ pub fn convert_to_mesh(
     // actually lies inside every plane's half-space, and to dedupe vertices that
     // more than 3 planes meet at (e.g. a chamfered corner or a pyramid apex).
     const VERTEX_EPSILON: f64 = 1e-2;
-    // `calculate_normal`'s sign convention (outward vs. inward) depends on the
-    // winding of each plane's 3 points, which flips uniformly for every face
-    // when the brush is mirrored above. Rather than hardcode which convention
-    // applies post-mirror, derive which side of each plane is "interior" from
-    // a point that's roughly in the middle of the brush.
-    let interior_reference: DVec3 = planes_and_normals
-        .iter()
-        .map(|(_, p, _)| dvec3(p.v0))
-        .sum::<DVec3>()
-        / planes_and_normals.len() as f64;
-    let interior_signs: Vec<f64> = planes_and_normals
-        .iter()
-        .map(|(_, p, n)| {
-            let x = dvec3(p.v0);
-            // Choose the sign so that `(point - x).dot(n) * sign` is <= 0 for the
-            // interior reference point, i.e. so margin <= 0 means "interior side".
-            if (interior_reference - x).dot(*n) >= 0.0 {
-                -1.0
-            } else {
-                1.0
-            }
-        })
-        .collect();
+    // The .map format winds each plane's 3 points so that `calculate_normal`
+    // yields the OUTWARD normal (part of the format's semantics -- the points
+    // are otherwise arbitrary points on the plane, and tools like the clip
+    // tool write points far outside the brush, so nothing about the interior
+    // can be derived from the points themselves). `mirror_xz` above is a
+    // reflection (determinant -1), which flips the orientation of every cross
+    // product, so post-mirror the computed normals all point INWARD: a point
+    // is on a plane's interior side iff `(point - x).dot(n) >= 0`.
+    //
+    // (An earlier version instead derived each plane's interior side from the
+    // mean of the planes' definition points, assuming it fell inside the
+    // brush. It does for pristine box brushes, whose definition points are
+    // brush corners, but not in general: clipped brushes place definition
+    // points well outside the brush, the mean landed outside a plane, and
+    // that plane's sign came out inverted -- rejecting every true vertex not
+    // on the plane itself and leaving most faces empty.)
     for c in planes_and_normals.iter().combinations(3) {
         let (i0, p0, n0) = c[0];
         let (i1, p1, n1) = c[1];
@@ -120,13 +113,13 @@ pub fn convert_to_mesh(
         // lies on the interior side of every plane, not just the three we
         // solved with. This is what makes the intersection test work for any
         // convex brush, not just ones where faces meet at right angles.
-        let is_vertex = planes_and_normals.iter().zip(interior_signs.iter()).all(
-            |((_, plane, normal), sign)| {
-                let x = dvec3(plane.v0);
-                let n = normal.normalize();
-                (intersection - x).dot(n) * sign <= VERTEX_EPSILON
-            },
-        );
+        let is_vertex = planes_and_normals.iter().all(|(_, plane, normal)| {
+            let x = dvec3(plane.v0);
+            let n = normal.normalize();
+            // n points inward post-mirror (see above), so interior points have
+            // a non-negative projection onto it.
+            (intersection - x).dot(n) >= -VERTEX_EPSILON
+        });
         if !is_vertex {
             continue;
         }
@@ -156,19 +149,15 @@ pub fn convert_to_mesh(
         .min_by(|a, b| (a.x, a.y, a.z).partial_cmp(&(b.x, b.y, b.z)).unwrap())
         .expect("a convex brush has at least one vertex");
 
-    // The true (geometric) outward normal, independent of `calculate_normal`'s
-    // raw sign convention -- see `interior_signs` above. This is kept separate
-    // from the `normal` passed to `triangulate_face` below: that one only
-    // needs to be *some* consistent convention to drive triangle winding
-    // (which is already correct for Unreal's culling/collision as-is), while
-    // this one is baked as an explicit per-face vertex normal so lighting
-    // doesn't depend on winding at all. Keeping the two independent means
-    // fixing lighting here can't also flip winding and break culling/collision.
-    let true_outward_normals: Vec<DVec3> = normals
-        .iter()
-        .zip(interior_signs.iter())
-        .map(|(n, s)| *n * *s)
-        .collect();
+    // The true (geometric) outward normal: the negation of the post-mirror
+    // (inward, see above) computed normal. This is kept separate from the
+    // `normal` passed to `triangulate_face` below: that one only needs to be
+    // *some* consistent convention to drive triangle winding (which is
+    // already correct for Unreal's culling/collision as-is), while this one
+    // is baked as an explicit per-face vertex normal so lighting doesn't
+    // depend on winding at all. Keeping the two independent means fixing
+    // lighting here can't also flip winding and break culling/collision.
+    let true_outward_normals: Vec<DVec3> = normals.iter().map(|n| -*n).collect();
 
     let mut positions = vec![];
     let mut faces = vec![];
@@ -1085,6 +1074,45 @@ mod tests {
                 assert!(
                     boundary_edges.is_empty(),
                     "found holes/non-manifold edges: {boundary_edges:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn convert_to_mesh_has_no_boundary_edges_for_clipped_brushes() {
+        // Regression test for a user-reported repro (a brush cut with the
+        // clip tool): see /workspace/tmp.map.
+        const MAP: &str = r#"
+{
+"classname" "trigger_hazard"
+{
+( 240 -112 16 ) ( 240 -111 16 ) ( 240 -112 17 ) __TB_empty 0 0 0 1 1
+( 240 -112 16 ) ( 241 -112 16 ) ( 240 -111 16 ) __TB_empty 0 0.99999905 0 1 1
+( 368 16 48 ) ( 368 17 48 ) ( 369 16 48 ) __TB_empty 0 0.99999905 0 1 1
+( 368 16 48 ) ( 369 16 48 ) ( 368 16 49 ) __TB_empty 0 0 0 1 1
+( 256 -48 48 ) ( 240 -64 48 ) ( 240 -64 176 ) __TB_empty 0 0 0 1 1
+}
+{
+( 240 -144 16 ) ( 240 -143 16 ) ( 240 -144 17 ) __TB_empty 0 0 0 1 1
+( 256 -80 48 ) ( 240 -96 176 ) ( 240 -96 48 ) __TB_empty 0 0 0 1 1
+( 240 -144 16 ) ( 240 -144 17 ) ( 241 -144 16 ) __TB_empty 0 0 0 1 1
+( 240 -144 16 ) ( 241 -144 16 ) ( 240 -143 16 ) __TB_empty 0 0 0 1 1
+( 368 -16 48 ) ( 368 -15 48 ) ( 369 -16 48 ) __TB_empty 0 0 0 1 1
+( 368 -16 48 ) ( 369 -16 48 ) ( 368 -16 49 ) __TB_empty 0 0 0 1 1
+( 368 -16 48 ) ( 368 -16 49 ) ( 368 -15 48 ) __TB_empty 0 0 0 1 1
+}
+}
+"#;
+        let (_, ast) =
+            shalrath::parser::repr::parse_map(MAP.trim()).expect("parse embedded test map");
+        for ent in ast.0 {
+            for (i, brush) in ent.brushes.0.iter().enumerate() {
+                let (mesh, _origin) = convert_to_mesh(brush, 64.0);
+                let boundary_edges = find_boundary_edges(&mesh);
+                assert!(
+                    boundary_edges.is_empty(),
+                    "brush {i}: found holes/non-manifold edges: {boundary_edges:?}"
                 );
             }
         }
