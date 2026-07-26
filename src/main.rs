@@ -128,8 +128,8 @@ fn with_name<'a, C: Read + Seek>(name: &'a str) -> UnrealExportConstraint<'a, C>
     })
 }
 
-fn find_export<'a, C: Read + Seek>(
-    asset: &'a unreal_asset::Asset<C>,
+fn find_export<C: Read + Seek>(
+    asset: &unreal_asset::Asset<C>,
     constraints: &[UnrealExportConstraint<C>],
 ) -> Option<PackageIndex> {
     let mut maybe_idx = None;
@@ -432,14 +432,6 @@ fn main() {
             find_export(&umap, &vec![with_name("BP_Hazard_C")]).unwrap(),
             find_export(&umap, &vec![with_name("BP_SavePoint_C")]).unwrap(),
             find_export(&umap, &vec![with_name("BP_JumpBubble_C")]).unwrap(),
-            find_export(&umap, &vec![with_name("BP_ExaminableGrave_C")]).unwrap(),
-            find_export(
-                &umap,
-                &vec![with_name(
-                    "ChildActor_GEN_VARIABLE_BP_ExamineTextPopup_C_CAT",
-                )],
-            )
-            .unwrap(),
         ];
 
         debug_println!("Removing reference actors: {}", slice_to_string(&idxs));
