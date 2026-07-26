@@ -140,6 +140,22 @@ fn find_vec_property_mut<'a>(
     return result;
 }
 
+fn find_obj_property<'a>(
+    export: &'a unreal_asset::Export<PackageIndex>,
+    name: &str,
+) -> Option<&'a unreal_asset::properties::object_property::ObjectProperty> {
+    let mut result = None;
+    let props = &export.get_normal_export().unwrap().properties;
+    for prop in props {
+        if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
+            if obj_prop.name.get_content(|content| content == name) {
+                result = Some(obj_prop);
+            }
+        }
+    }
+    return result;
+}
+
 fn find_obj_property_mut<'a>(
     export: &'a mut unreal_asset::Export<PackageIndex>,
     name: &str,
@@ -380,8 +396,8 @@ fn deep_clone_export<C: Read + Seek>(
 
 fn add_hazard_actor<C: Read + Seek>(
     umap: &mut unreal_asset::Asset<C>,
-    import_idx: PackageIndex,
-    origin: DVec3,
+    _import_idx: PackageIndex,
+    _origin: DVec3,
 ) {
     // Hardcode to find BP_Hazard_C and use it as the reference export.
     let idx = find_export(&umap, &vec![with_name("BP_Hazard_C")]).unwrap();
@@ -389,6 +405,45 @@ fn add_hazard_actor<C: Read + Seek>(
     add_actor_to_level(umap, idx);
 
     // TODO put import_idx and origin in deep cloned export
+}
+
+/// Get a mutable reference to the export referenced by the ObjectProperty with name |object_name|
+/// on the export at index |idx|.
+fn get_linked_export_mut<'a, C: Read + Seek>(
+    umap: &'a mut unreal_asset::Asset<C>,
+    idx: PackageIndex,
+    object_name: &str,
+) -> Option<&'a mut unreal_asset::Export<PackageIndex>> {
+    let export = umap.get_export(idx)?;
+    let prop = find_obj_property(export, object_name)?;
+    assert!(prop.value.index > 0); // must be export
+    umap.get_export_mut(prop.value)
+}
+
+fn set_obj_property(
+    export: &mut unreal_asset::Export<PackageIndex>,
+    object_name: &str,
+    idx: PackageIndex,
+) {
+    let base_export = export.get_base_export_mut();
+    let export_name = base_export.object_name.get_owned_content();
+    base_export
+        .create_before_serialization_dependencies
+        .push(idx);
+    // this error message should really be in the function.
+    let prop = find_obj_property_mut(export, object_name).expect(&format!(
+        "couldn't find object property \"{}\" in {}",
+        object_name, export_name
+    ));
+    prop.value = idx;
+}
+
+fn set_location(export: &mut unreal_asset::Export<PackageIndex>, location: DVec3) {
+    let prop = find_vec_property_mut(export, "RelativeLocation")
+        .expect("couldn't find RelativeLocation property");
+    prop.value.x.0 = location.x;
+    prop.value.y.0 = location.y;
+    prop.value.z.0 = location.z;
 }
 
 fn add_static_mesh_actor<C: Read + Seek>(
@@ -407,48 +462,15 @@ fn add_static_mesh_actor<C: Read + Seek>(
     .unwrap();
     let export1 = umap.get_export_mut(idx1).unwrap();
 
-    // Find its parent: the StaticMeshActor.
+    // Find the parent (a StaticMeshActor) and deep clone it.
     let idx2 = export1.get_base_export().outer_index;
-    let idx1c = clone_export(umap, idx1).unwrap();
-    let idx2c = clone_export(umap, idx2).unwrap();
-    add_actor_to_level(umap, idx2c);
+    let idx3 = deep_clone_export(umap, idx2);
+    add_actor_to_level(umap, idx3);
 
-    {
-        // StaticMeshComponent0
-        let export1c = umap.get_export_mut(idx1c).unwrap();
-        let export1c_base = export1c.get_base_export_mut();
-
-        // Point to new parent
-        export1c_base.outer_index = idx2c;
-        export1c_base.create_before_create_dependencies[0] = idx2c;
-
-        // Point to new import
-        export1c_base
-            .create_before_serialization_dependencies
-            .push(import_idx);
-        {
-            let prop = find_obj_property_mut(export1c, "StaticMesh")
-                .expect("couldn't find StaticMesh property");
-            prop.value = import_idx;
-        }
-        // Set world position
-        {
-            let prop = find_vec_property_mut(export1c, "RelativeLocation")
-                .expect("couldn't find RelativeLocation property");
-            prop.value.x.0 = origin.x;
-            prop.value.y.0 = origin.y;
-            prop.value.z.0 = origin.z;
-        }
-    }
-
-    {
-        // StaticMeshActor
-        let export2c = umap.get_export_mut(idx2c).unwrap();
-        // Point to new child
-        export2c
-            .get_base_export_mut()
-            .create_before_serialization_dependencies[0] = idx1c;
-    }
+    // Find the cloned StaticMeshComponent0 and redirect it to the new import.
+    let export4 = get_linked_export_mut(umap, idx3, "StaticMeshComponent").unwrap();
+    set_obj_property(export4, "StaticMesh", import_idx);
+    set_location(export4, origin);
 }
 
 fn main() {
