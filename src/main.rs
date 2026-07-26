@@ -402,15 +402,19 @@ fn deep_clone_export<C: Read + Seek>(
 
 fn add_hazard_actor<C: Read + Seek>(
     umap: &mut unreal_asset::Asset<C>,
-    _import_idx: PackageIndex,
-    _origin: DVec3,
+    import_idx: PackageIndex,
+    origin: DVec3,
 ) {
-    // Hardcode to find BP_Hazard_C and use it as the reference export.
+    // Hardcoded to find the BP_Hazard_C and use it as the reference export.
     let idx = find_export(&umap, &vec![with_name("BP_Hazard_C")]).unwrap();
     let idx = deep_clone_export(umap, idx);
     add_actor_to_level(umap, idx);
 
-    // TODO put import_idx and origin in deep cloned export
+    let export_sm = get_linked_export_mut(umap, idx, "StaticMesh").unwrap();
+    set_obj_property(export_sm, "StaticMesh", import_idx);
+
+    let export_root = get_linked_export_mut(umap, idx, "DefaultSceneRoot").unwrap();
+    set_location(export_root, origin);
 }
 
 /// Get a mutable reference to the export referenced by the ObjectProperty with name |object_name|
