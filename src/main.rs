@@ -291,7 +291,11 @@ fn get_linked_export_mut<'a, C: Read + Seek>(
     umap.get_export_mut(prop.value)
 }
 
-fn set_name_property(export: &mut unreal_asset::Export<PackageIndex>, key: &str, value: unreal_asset::types::FName) {
+fn set_name_property(
+    export: &mut unreal_asset::Export<PackageIndex>,
+    key: &str,
+    value: unreal_asset::types::FName,
+) {
     let prop = find_name_property_mut(export, key).unwrap();
     prop.value = value;
 }
@@ -327,9 +331,7 @@ fn set_location(export: &mut unreal_asset::Export<PackageIndex>, location: DVec3
 // renames the cloned component and `set_obj_property` repoints its
 // StaticMesh at the generated mesh's import, so this stays unambiguous no
 // matter how many clones have been added.
-fn find_original_static_mesh_actor<C: Read + Seek>(
-    umap: &unreal_asset::Asset<C>,
-) -> PackageIndex {
+fn find_original_static_mesh_actor<C: Read + Seek>(umap: &unreal_asset::Asset<C>) -> PackageIndex {
     let idx = find_export(
         &umap,
         &vec![
