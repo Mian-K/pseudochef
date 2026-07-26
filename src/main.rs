@@ -292,7 +292,13 @@ fn collect_owned_exports<C: Read + Seek>(
             if owned.contains(&candidate) {
                 continue;
             }
-            if asset.get_export(candidate).unwrap().get_base_export().outer_index == outer {
+            if asset
+                .get_export(candidate)
+                .unwrap()
+                .get_base_export()
+                .outer_index
+                == outer
+            {
                 owned.push(candidate);
             }
         }
@@ -687,12 +693,17 @@ mod deep_clone_export_tests {
             "cloned subtree must not overlap the original"
         );
         assert!(
-            new_subtree.iter().all(|idx| idx.index > export_count_before as i32),
+            new_subtree
+                .iter()
+                .all(|idx| idx.index > export_count_before as i32),
             "every cloned export should be newly appended"
         );
 
-        let old_to_new: HashMap<PackageIndex, PackageIndex> =
-            old_subtree.iter().copied().zip(new_subtree.iter().copied()).collect();
+        let old_to_new: HashMap<PackageIndex, PackageIndex> = old_subtree
+            .iter()
+            .copied()
+            .zip(new_subtree.iter().copied())
+            .collect();
 
         for (i, (&old_idx, &new_idx)) in old_subtree.iter().zip(new_subtree.iter()).enumerate() {
             let old_export = &originals[i];
@@ -701,16 +712,34 @@ mod deep_clone_export_tests {
             let new_base = new_export.get_base_export();
 
             // Fresh, distinct name.
-            assert_ne!(new_base.object_name.get_owned_content(), old_base.object_name.get_owned_content());
+            assert_ne!(
+                new_base.object_name.get_owned_content(),
+                old_base.object_name.get_owned_content()
+            );
             assert!(
-                new_base.object_name.get_owned_content().contains(&old_base.object_name.get_owned_content())
+                new_base
+                    .object_name
+                    .get_owned_content()
+                    .contains(&old_base.object_name.get_owned_content())
             );
 
             // outer/class/super/template indices follow the same remap rule.
-            assert_eq!(new_base.class_index, expected_remap(old_base.class_index, &old_to_new));
-            assert_eq!(new_base.super_index, expected_remap(old_base.super_index, &old_to_new));
-            assert_eq!(new_base.template_index, expected_remap(old_base.template_index, &old_to_new));
-            assert_eq!(new_base.outer_index, expected_remap(old_base.outer_index, &old_to_new));
+            assert_eq!(
+                new_base.class_index,
+                expected_remap(old_base.class_index, &old_to_new)
+            );
+            assert_eq!(
+                new_base.super_index,
+                expected_remap(old_base.super_index, &old_to_new)
+            );
+            assert_eq!(
+                new_base.template_index,
+                expected_remap(old_base.template_index, &old_to_new)
+            );
+            assert_eq!(
+                new_base.outer_index,
+                expected_remap(old_base.outer_index, &old_to_new)
+            );
 
             // The four X_before_Y_dependencies fields, remapped entry-by-entry.
             let old_deps = [
@@ -742,9 +771,15 @@ mod deep_clone_export_tests {
                 .get_normal_export()
                 .map(|n| collect_property_refs(&n.properties))
                 .unwrap_or_default();
-            let expected_refs: Vec<PackageIndex> =
-                old_refs.iter().map(|&r| expected_remap(r, &old_to_new)).collect();
-            assert_eq!(new_refs, expected_refs, "property refs at export {:?}", old_idx);
+            let expected_refs: Vec<PackageIndex> = old_refs
+                .iter()
+                .map(|&r| expected_remap(r, &old_to_new))
+                .collect();
+            assert_eq!(
+                new_refs, expected_refs,
+                "property refs at export {:?}",
+                old_idx
+            );
         }
 
         // The original subtree must be completely unmodified.
@@ -790,8 +825,18 @@ mod deep_clone_export_tests {
 
         // Content (base string) is expected to match ("pseudochef_BP_Hazard_C" for
         // both); uniqueness comes from the FName instance number instead.
-        let name_a = umap.get_export(clone_a).unwrap().get_base_export().object_name.clone();
-        let name_b = umap.get_export(clone_b).unwrap().get_base_export().object_name.clone();
+        let name_a = umap
+            .get_export(clone_a)
+            .unwrap()
+            .get_base_export()
+            .object_name
+            .clone();
+        let name_b = umap
+            .get_export(clone_b)
+            .unwrap()
+            .get_base_export()
+            .object_name
+            .clone();
         assert_eq!(name_a.get_owned_content(), name_b.get_owned_content());
         assert_ne!(name_a.get_number(), name_b.get_number());
 
@@ -800,4 +845,3 @@ mod deep_clone_export_tests {
         assert!(subtree_a.is_disjoint(&subtree_b));
     }
 }
-
