@@ -1,5 +1,6 @@
 use glam::DVec3;
 use shalrath::parser::repr::parse_map;
+use std::collections::HashMap;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
 use std::sync::OnceLock;
@@ -9,7 +10,7 @@ use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::types::PackageIndex;
 
 mod brush_to_mesh;
-use brush_to_mesh::convert_to_mesh;
+use brush_to_mesh::{tb_space_to_unreal_space, convert_to_mesh};
 
 mod unreal_asset_ext;
 use unreal_asset_ext::{deep_clone_export, deep_delete_export};
@@ -52,7 +53,6 @@ const MISE_UEXP: &[u8] = include_bytes!("mise/mise.uexp");
 // see `brush_to_mesh::convert_to_mesh`. Smaller values give smoother
 // per-vertex lighting at the cost of more geometry.
 const FACE_VERTEX_SPACING: f64 = 64.0;
-const MESH_CONVERSION_SCALE: f64 = 4.0;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -225,13 +225,11 @@ fn pak_add_brush<W: Write + Seek>(
     asset_name: &str,
 ) -> Option<(String, DVec3)> {
     let (mesh, origin) = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
-    let mut origin = DVec3::from(origin);
-    origin *= MESH_CONVERSION_SCALE;
     let cooked = pseudocooker::cook(
         &mesh,
         asset_name,
         false,
-        MESH_CONVERSION_SCALE,
+        1.0,
         &default_opts(),
     );
     let uasset_path = format!("Mods/Maps/{}/gen/{}.uasset", level_name, asset_name);
@@ -269,6 +267,15 @@ fn add_static_mesh_import<C: Read + Seek>(
 
     // Return the index of the newly-added import.
     umap.add_import(import2c)
+}
+
+fn add_player_start<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, origin: DVec3) {
+    let idx = find_export(umap, &vec![with_name("PlayerStart")]).unwrap();
+    let idx = deep_clone_export(umap, idx);
+    add_actor_to_level(umap, idx);
+
+    let root = get_linked_export_mut(umap, idx, "RootComponent").unwrap();
+    set_location(root, origin);
 }
 
 fn add_hazard_actor<C: Read + Seek>(
@@ -329,9 +336,9 @@ fn set_location(export: &mut unreal_asset::Export<PackageIndex>, location: DVec3
 
 fn lazy_find_original_static_mesh_actor<C: Read + Seek>(
     umap: &unreal_asset::Asset<C>,
-) -> &PackageIndex {
+) -> PackageIndex {
     static ORIGINAL_STATIC_MESH_ACTOR: OnceLock<PackageIndex> = OnceLock::new();
-    ORIGINAL_STATIC_MESH_ACTOR.get_or_init(|| {
+    *ORIGINAL_STATIC_MESH_ACTOR.get_or_init(|| {
         let idx = find_export(
             &umap,
             &vec![
@@ -352,7 +359,7 @@ fn add_static_mesh_actor<C: Read + Seek>(
     import_idx: PackageIndex,
     origin: DVec3,
 ) {
-    let idx2 = lazy_find_original_static_mesh_actor(umap).clone();
+    let idx2 = lazy_find_original_static_mesh_actor(umap);
     let idx3 = deep_clone_export(umap, idx2);
     add_actor_to_level(umap, idx3);
 
@@ -392,33 +399,42 @@ fn main() {
     let mut num_hazard_brushes = 0;
     let start = Instant::now();
     for ent in ast.0 {
-        for prop in ent.properties.0 {
-            if prop.key == "classname" {
-                if prop.value == "worldspawn" {
-                    for brush in &ent.brushes.0 {
-                        num_world_brushes += 1;
-                        let name = format!("WorldBrush{}", num_world_brushes);
-                        let (abs_path, origin) =
-                            pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
-                        let idx = add_static_mesh_import(&mut umap, &abs_path);
-                        add_static_mesh_actor(&mut umap, idx, origin);
-                    }
-                }
-                if prop.value == "trigger_hazard" {
-                    for brush in &ent.brushes.0 {
-                        num_hazard_brushes += 1;
-                        let name = format!("HazardBrush{}", num_hazard_brushes);
-                        let (abs_path, origin) =
-                            pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
-                        let idx = add_static_mesh_import(&mut umap, &abs_path);
-                        add_hazard_actor(&mut umap, idx, origin);
-                    }
+        let props: HashMap<String, String> = ent
+            .properties
+            .0
+            .into_iter()
+            .map(|p| (p.key, p.value))
+            .collect();
+        match props["classname"].as_ref() {
+            "worldspawn" => {
+                for brush in &ent.brushes.0 {
+                    num_world_brushes += 1;
+                    let name = format!("WorldBrush{}", num_world_brushes);
+                    let (abs_path, origin) = pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
+                    let idx = add_static_mesh_import(&mut umap, &abs_path);
+                    add_static_mesh_actor(&mut umap, idx, origin);
                 }
             }
-        }
+            "trigger_hazard" => {
+                for brush in &ent.brushes.0 {
+                    num_hazard_brushes += 1;
+                    let name = format!("HazardBrush{}", num_hazard_brushes);
+                    let (abs_path, origin) = pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
+                    let idx = add_static_mesh_import(&mut umap, &abs_path);
+                    add_hazard_actor(&mut umap, idx, origin);
+                }
+            }
+            "info_player_start" => {
+                let numbers: Vec<f64> = props["origin"].split_whitespace().map(|n| n.parse().unwrap()).collect();
+                let origin = DVec3::from_slice(&numbers);
+                let origin = tb_space_to_unreal_space(origin);
+                add_player_start(&mut umap, origin);
+            }
+            _ => {}
+        };
     }
     let elapsed = start.elapsed();
-    println!("mesh generation completed in {}ms", elapsed.as_millis());
+    println!("Mesh generation completed in {}ms", elapsed.as_millis());
 
     // rename level export (for swag only; seemingly inconsequential)
     {
@@ -434,7 +450,8 @@ fn main() {
             find_export(&umap, &vec![with_name("BP_Hazard_C")]).unwrap(),
             find_export(&umap, &vec![with_name("BP_SavePoint_C")]).unwrap(),
             find_export(&umap, &vec![with_name("BP_JumpBubble_C")]).unwrap(),
-            *lazy_find_original_static_mesh_actor(&umap),
+            find_export(&umap, &vec![with_name("PlayerStart")]).unwrap(),
+            lazy_find_original_static_mesh_actor(&umap),
         ];
 
         for idx in idxs {

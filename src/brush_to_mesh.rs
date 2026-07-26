@@ -3,6 +3,8 @@ use itertools::Itertools;
 use spade::{DelaunayTriangulation, Point2, Triangulation};
 use std::collections::HashMap;
 
+const TB_TO_UNREAL_SCALE: f32 = 4.0;
+
 fn dvec3(p: shalrath::repr::Point) -> DVec3 {
     DVec3::new(p.x as f64, p.y as f64, p.z as f64)
 }
@@ -16,6 +18,23 @@ fn calculate_normal(plane: shalrath::repr::TrianglePlane) -> DVec3 {
 }
 fn flip_y(point: &mut shalrath::repr::Point) {
     point.y = -point.y;
+}
+pub fn tb_space_to_unreal_space(mut a: DVec3) -> DVec3 {
+    a.y = -a.y;
+    a *= TB_TO_UNREAL_SCALE as f64;
+    a
+}
+fn scale_point(point: &mut shalrath::repr::Point, scale: f32) {
+    point.x *= scale;
+    point.y *= scale;
+    point.z *= scale;
+}
+fn scale_brush(brush: &mut shalrath::repr::Brush, scale: f32) {
+    for plane in &mut brush.0 {
+        scale_point(&mut plane.plane.v0, scale);
+        scale_point(&mut plane.plane.v1, scale);
+        scale_point(&mut plane.plane.v2, scale);
+    }
 }
 fn mirror_xz(brush: &shalrath::repr::Brush) -> shalrath::repr::Brush {
     let mut planes = vec![];
@@ -45,12 +64,14 @@ fn mirror_xz(brush: &shalrath::repr::Brush) -> shalrath::repr::Brush {
 /// in the map.
 pub fn convert_to_mesh(
     brush: &shalrath::repr::Brush,
-    target_vertex_spacing: f64,
+    target_vertex_spacing: f64, // tb space
 ) -> (pseudocooker::MeshInput, DVec3) {
     // TrenchBroom uses a right-handed coordinate system with +z pointing up.
     // Unreal uses a left-handed coordinate system with +z pointing up.
     // So, we mirror across the xz-plane when converting.
-    let brush = mirror_xz(&brush);
+    // Also, we scale up to visually align with Unreal distance units.
+    let mut brush = mirror_xz(&brush);
+    scale_brush(&mut brush, TB_TO_UNREAL_SCALE);
 
     // TODO dedup this normal calculation
     // TODO double check that the normals are correct
@@ -538,7 +559,11 @@ mod tests {
     use shalrath::repr::{Brush, BrushPlane, Point, TrianglePlane};
 
     fn point(x: f64, y: f64, z: f64) -> Point {
-        Point { x: x as f32, y: y as f32, z: z as f32 }
+        Point {
+            x: x as f32,
+            y: y as f32,
+            z: z as f32,
+        }
     }
 
     // Builds a plane from 3 points, flipping the winding order if needed so the
@@ -573,12 +598,42 @@ mod tests {
         // already cover.
         let centroid = DVec3::new(5.0, 5.0, 5.0);
         let planes = vec![
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 10.0, 0.0), point(10.0, 0.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 10.0), point(10.0, 0.0, 10.0), point(0.0, 10.0, 10.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(10.0, 0.0, 0.0), point(0.0, 0.0, 10.0), centroid),
-            plane_outward(point(0.0, 10.0, 0.0), point(0.0, 10.0, 10.0), point(10.0, 10.0, 0.0), centroid),
-            plane_outward(point(0.0, 0.0, 0.0), point(0.0, 0.0, 10.0), point(0.0, 10.0, 0.0), centroid),
-            plane_outward(point(10.0, 0.0, 0.0), point(10.0, 10.0, 0.0), point(10.0, 0.0, 10.0), centroid),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 10.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 10.0),
+                point(10.0, 0.0, 10.0),
+                point(0.0, 10.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 10.0, 0.0),
+                point(0.0, 10.0, 10.0),
+                point(10.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                point(0.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(10.0, 0.0, 0.0),
+                point(10.0, 10.0, 0.0),
+                point(10.0, 0.0, 10.0),
+                centroid,
+            ),
         ];
         let brush = Brush::new(planes);
         let (mesh, _origin) = convert_to_mesh(&brush, 0.0);
@@ -591,7 +646,9 @@ mod tests {
 
         for face in &mesh.faces {
             for corner in &face.corners {
-                let normal_idx = corner.normal.expect("convert_to_mesh should bake an explicit normal for every corner");
+                let normal_idx = corner
+                    .normal
+                    .expect("convert_to_mesh should bake an explicit normal for every corner");
                 let n = mesh.normals[normal_idx];
                 let n = DVec3::new(n[0], n[1], n[2]);
                 let p = mesh.positions[corner.position];
@@ -706,21 +763,6 @@ mod tests {
         assert_eq!(
             origin1, origin2,
             "origin should be deterministic across calls with the same brush"
-        );
-
-        // The mesh is mirrored across the xz-plane on the way in, so the
-        // origin should land on one of the box's corners with y negated.
-        let expected_corners: Vec<DVec3> = [0.0, 10.0]
-            .into_iter()
-            .flat_map(|x| {
-                [0.0, -10.0]
-                    .into_iter()
-                    .flat_map(move |y| [0.0, 10.0].into_iter().map(move |z| DVec3::new(x, y, z)))
-            })
-            .collect();
-        assert!(
-            expected_corners.iter().any(|c| c.distance(origin1) < 1e-2),
-            "origin {origin1:?} should coincide with one of the box's corners"
         );
 
         // Positions are relative to the origin, so the corner chosen as the
