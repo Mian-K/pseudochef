@@ -6,13 +6,15 @@ use std::io::{Read, Seek, Write};
 use std::time::Instant;
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
+use unreal_asset::reader::ArchiveTrait;
 use unreal_asset::types::PackageIndex;
 
 mod brush_to_mesh;
 use brush_to_mesh::convert_to_mesh;
 
 mod deep_clone;
-use deep_clone::deep_clone_export;
+use deep_clone::{collect_owned_exports, deep_clone_export, remap_property};
+use std::collections::HashMap;
 
 // For debugging purposes; may not be called
 #[allow(dead_code)]
@@ -218,16 +220,91 @@ fn remove_actors_from_level<C: Read + Seek>(
     let unreal_asset::Export::LevelExport(level_export) = export else {
         panic!("PersistentLevel was not a LevelExport");
     };
-    let actors: HashSet<&PackageIndex> = level_export.actors.iter().collect();
-    level_export.actors = (&actors - &to_remove)
-        .into_iter()
-        .map(|idx| idx.clone())
-        .collect();
+    // Preserve order: the engine requires WorldSettings to stay at Actors[0]
+    // (ULevel::PostLoad does WorldSettings = Cast<AWorldSettings>(Actors[0])).
+    level_export.actors.retain(|idx| !to_remove.contains(idx));
     #[cfg(debug_assertions)]
     println!(
         "remaining actors: {}",
         slice_to_string(&level_export.actors)
     );
+}
+
+// Turns the export subtree rooted at `root` (an actor already removed from the
+// level's actor list) into inert placeholder exports. Removing an actor from
+// ULevel::Actors only stops the engine from registering it: the loader still
+// creates every export in the package, and in cooked builds actor iteration
+// (TActorIterator / GetAllActorsOfClass) discovers actors through the global
+// object hash by class, not through ULevel::Actors. Rewriting each export to an
+// empty, plain SceneComponent destroys the class identity game code could look
+// up. The exports are rewritten in place rather than deleted because raw
+// serialized data elsewhere in the package embeds export indices (e.g. UWorld's
+// PersistentLevel reference), so indices must stay stable.
+fn tombstone_export_subtree<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, root: PackageIndex) {
+    let doomed = collect_owned_exports(umap, root);
+
+    let class_idx = find_import(umap, "Class", "SceneComponent").unwrap();
+    let cdo_idx = match find_import(umap, "SceneComponent", "Default__SceneComponent") {
+        Some(idx) => idx,
+        None => {
+            // Clone an existing /Script/Engine CDO import as a pattern.
+            let pattern = find_import(umap, "PlayerStart", "Default__PlayerStart").unwrap();
+            let mut import = umap.get_import(pattern).unwrap().clone();
+            import.class_name = umap.add_fname("SceneComponent");
+            import.object_name = umap.add_fname("Default__SceneComponent");
+            umap.add_import(import)
+        }
+    };
+
+    for &idx in &doomed {
+        let name = umap.add_fname_with_number("pseudochef_tombstone", idx.index);
+        let export = umap.get_export_mut(idx).unwrap();
+        let normal = export
+            .get_normal_export_mut()
+            .expect("tombstone target must be a normal export");
+        normal.properties.clear();
+        // A SceneComponent's body beyond tagged properties: UObject's "serialize
+        // guid" flag and UActorComponent's UCSModifiedProperties array, both zero.
+        normal.extras = vec![0; 8];
+        let base = export.get_base_export_mut();
+        base.object_name = name;
+        base.class_index = class_idx;
+        base.super_index = PackageIndex::new(0);
+        base.template_index = cdo_idx;
+        base.serialization_before_serialization_dependencies.clear();
+        base.create_before_serialization_dependencies.clear();
+        base.serialization_before_create_dependencies = vec![class_idx, cdo_idx];
+        // create_before_create_dependencies (the outer chain) stays valid as-is.
+    }
+
+    // Scrub surviving references to the doomed exports: drop them from
+    // dependency lists and null out object/delegate properties.
+    let doomed_set: HashSet<PackageIndex> = doomed.iter().copied().collect();
+    let to_null: HashMap<PackageIndex, PackageIndex> = doomed
+        .iter()
+        .map(|&idx| (idx, PackageIndex::new(0)))
+        .collect();
+    for i in 0..umap.asset_data.exports.len() {
+        let idx = PackageIndex::new((i + 1) as i32);
+        if doomed_set.contains(&idx) {
+            continue;
+        }
+        let export = &mut umap.asset_data.exports[i];
+        let base = export.get_base_export_mut();
+        base.serialization_before_serialization_dependencies
+            .retain(|d| !doomed_set.contains(d));
+        base.create_before_serialization_dependencies
+            .retain(|d| !doomed_set.contains(d));
+        base.serialization_before_create_dependencies
+            .retain(|d| !doomed_set.contains(d));
+        base.create_before_create_dependencies
+            .retain(|d| !doomed_set.contains(d));
+        if let Some(normal) = export.get_normal_export_mut() {
+            for prop in &mut normal.properties {
+                remap_property(prop, &to_null);
+            }
+        }
+    }
 }
 
 fn add_actor_to_level<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageIndex) {
@@ -460,6 +537,9 @@ fn main() {
         #[cfg(debug_assertions)]
         println!("Removing reference actors: {}", slice_to_string(&idxs),);
         remove_actors_from_level(&mut umap, &idxs);
+        for &idx in &idxs {
+            tombstone_export_subtree(&mut umap, idx);
+        }
     }
 
     let mut final_umap = std::io::Cursor::new(vec![]);
@@ -491,4 +571,87 @@ fn main() {
         humansize::format_size(bytes_written, humansize::DECIMAL),
         args[2]
     );
+}
+
+#[cfg(test)]
+mod tombstone_tests {
+    use super::*;
+
+    fn load_umap() -> unreal_asset::Asset<std::io::Cursor<&'static [u8]>> {
+        unreal_asset::Asset::new(
+            std::io::Cursor::new(MISE_UMAP),
+            Some(std::io::Cursor::new(MISE_UEXP)),
+            unreal_asset::engine_version::EngineVersion::VER_UE5_1,
+            None,
+        )
+        .expect("failed to parse umap")
+    }
+
+    // Removing + tombstoning an actor must leave a package that unreal_asset can
+    // round-trip, with the same export count (indices stable), no export left
+    // whose class or name identifies the removed actor, and no surviving
+    // reference (level actor list, dependency lists, properties) to the doomed
+    // subtree.
+    #[test]
+    fn tombstone_bp_jump_bubble_c_round_trips() {
+        let mut umap = load_umap();
+        let root = find_export(&umap, &vec![with_name("BP_JumpBubble_C")]).unwrap();
+        let doomed = collect_owned_exports(&umap, root);
+        assert_eq!(doomed.len(), 4);
+        let export_count = umap.asset_data.exports.len();
+
+        remove_actors_from_level(&mut umap, &[root]);
+        tombstone_export_subtree(&mut umap, root);
+
+        let mut umap_bytes = std::io::Cursor::new(vec![]);
+        let mut uexp_bytes = std::io::Cursor::new(vec![]);
+        umap.write_data(&mut umap_bytes, Some(&mut uexp_bytes))
+            .expect("failed to serialize tombstoned umap");
+
+        let reloaded = unreal_asset::Asset::new(
+            std::io::Cursor::new(umap_bytes.into_inner()),
+            Some(std::io::Cursor::new(uexp_bytes.into_inner())),
+            unreal_asset::engine_version::EngineVersion::VER_UE5_1,
+            None,
+        )
+        .expect("failed to re-parse tombstoned umap");
+
+        assert_eq!(reloaded.asset_data.exports.len(), export_count);
+        assert!(find_export(&reloaded, &vec![with_name("BP_JumpBubble_C")]).is_none());
+
+        let scene_component_class =
+            find_import(&mut umap, "Class", "SceneComponent").unwrap();
+        for &idx in &doomed {
+            let base = reloaded.get_export(idx).unwrap().get_base_export();
+            assert_eq!(base.class_index, scene_component_class);
+            assert!(
+                base.object_name
+                    .get_content(|content| content.starts_with("pseudochef_tombstone"))
+            );
+            let normal = reloaded.get_export(idx).unwrap().get_normal_export().unwrap();
+            assert!(normal.properties.is_empty());
+        }
+
+        // No surviving export may reference the doomed subtree.
+        let doomed_set: std::collections::HashSet<PackageIndex> =
+            doomed.iter().copied().collect();
+        for (i, export) in reloaded.asset_data.exports.iter().enumerate() {
+            let idx = PackageIndex::new((i + 1) as i32);
+            if doomed_set.contains(&idx) {
+                continue;
+            }
+            let base = export.get_base_export();
+            for deps in [
+                &base.serialization_before_serialization_dependencies,
+                &base.create_before_serialization_dependencies,
+                &base.serialization_before_create_dependencies,
+                &base.create_before_create_dependencies,
+            ] {
+                assert!(deps.iter().all(|d| !doomed_set.contains(d)));
+            }
+            if let unreal_asset::Export::LevelExport(level) = export {
+                assert!(level.actors.iter().all(|a| !doomed_set.contains(a)));
+            }
+        }
+    }
 }

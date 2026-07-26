@@ -29,7 +29,7 @@ fn clone_export<C: Read + Seek>(
 // Unreal's subobject model, where e.g. an actor's components are separate exports
 // outered to the actor, and is exactly the set of exports that must be duplicated
 // together to deep clone `idx` as a self-contained subtree.
-fn collect_owned_exports<C: Read + Seek>(
+pub(crate) fn collect_owned_exports<C: Read + Seek>(
     asset: &unreal_asset::Asset<C>,
     idx: PackageIndex,
 ) -> Vec<PackageIndex> {
@@ -66,13 +66,29 @@ fn remap_package_index(index: &mut PackageIndex, old_to_new: &HashMap<PackageInd
 // Rewrites any PackageIndex found in `prop` (recursing into arrays, sets, maps and
 // structs) according to `old_to_new`. References outside `old_to_new` (e.g. imports,
 // or exports outside the cloned subtree) are left untouched.
-fn remap_property(
+pub(crate) fn remap_property(
     prop: &mut unreal_asset::properties::Property,
     old_to_new: &HashMap<PackageIndex, PackageIndex>,
 ) {
     use unreal_asset::properties::Property;
     match prop {
         Property::ObjectProperty(p) => remap_package_index(&mut p.value, old_to_new),
+        Property::DelegateProperty(p) => remap_package_index(&mut p.value.object, old_to_new),
+        Property::MulticastDelegateProperty(p) => {
+            for delegate in &mut p.value {
+                remap_package_index(&mut delegate.object, old_to_new);
+            }
+        }
+        Property::MulticastSparseDelegateProperty(p) => {
+            for delegate in &mut p.value {
+                remap_package_index(&mut delegate.object, old_to_new);
+            }
+        }
+        Property::MulticastInlineDelegateProperty(p) => {
+            for delegate in &mut p.value {
+                remap_package_index(&mut delegate.object, old_to_new);
+            }
+        }
         Property::ArrayProperty(p) => {
             for item in &mut p.value {
                 remap_property(item, old_to_new);
@@ -175,6 +191,22 @@ mod deep_clone_export_tests {
         fn visit(prop: &Property, refs: &mut Vec<PackageIndex>) {
             match prop {
                 Property::ObjectProperty(p) => refs.push(p.value),
+                Property::DelegateProperty(p) => refs.push(p.value.object),
+                Property::MulticastDelegateProperty(p) => {
+                    for delegate in &p.value {
+                        refs.push(delegate.object);
+                    }
+                }
+                Property::MulticastSparseDelegateProperty(p) => {
+                    for delegate in &p.value {
+                        refs.push(delegate.object);
+                    }
+                }
+                Property::MulticastInlineDelegateProperty(p) => {
+                    for delegate in &p.value {
+                        refs.push(delegate.object);
+                    }
+                }
                 Property::ArrayProperty(p) => {
                     for item in &p.value {
                         visit(item, refs);
