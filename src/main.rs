@@ -1,3 +1,4 @@
+use glam::DVec3;
 use shalrath::parser::repr::parse_map;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
@@ -48,6 +49,7 @@ const MISE_UEXP: &[u8] = include_bytes!("mise/mise.uexp");
 // see `brush_to_mesh::convert_to_mesh`. Smaller values give smoother
 // per-vertex lighting at the cost of more geometry.
 const FACE_VERTEX_SPACING: f64 = 64.0;
+const MESH_CONVERSION_SCALE: f64 = 4.0;
 
 fn default_opts() -> pseudocooker::CookOptions {
     pseudocooker::CookOptions {
@@ -192,7 +194,7 @@ fn clone_export<C: Read + Seek>(
     return Some(PackageIndex::new(asset.asset_data.exports.len() as i32));
 }
 
-fn add_actor<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageIndex) {
+fn add_actor_to_level<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageIndex) {
     let level_idx = find_export(asset, &vec![with_name("PersistentLevel")]).unwrap();
     let export = asset.get_export_mut(level_idx).unwrap();
     if let unreal_asset::Export::LevelExport(level_export) = export {
@@ -202,86 +204,116 @@ fn add_actor<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageInd
     }
 }
 
-fn process_brush<C: Read + Seek, W: Write + Seek>(
-    umap: &mut unreal_asset::Asset<C>,
+fn pak_add_brush<W: Write + Seek>(
     pak: &mut repak::PakWriter<W>,
-    i: usize,
     brush: &shalrath::repr::Brush,
-) {
+    level_name: &str,
+    asset_name: &str,
+) -> Option<(String, DVec3)> {
     let (mesh, origin) = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
-    let mut origin = glam::DVec3::from(origin);
-    origin *= 4.0;
-    let name = format!("tb{}", i);
-    let cooked = pseudocooker::cook(&mesh, &name, false, 4.0, &default_opts());
-    pak.write_file(
-        &format!("Mods/Maps/slop/{}.uasset", name),
-        true,
-        &cooked.uasset,
-    )
-    .expect("failed to write uasset to pak");
-    pak.write_file(&format!("Mods/Maps/slop/{}.uexp", name), true, &cooked.uexp)
+    let mut origin = DVec3::from(origin);
+    origin *= MESH_CONVERSION_SCALE;
+    let cooked = pseudocooker::cook(
+        &mesh,
+        asset_name,
+        false,
+        MESH_CONVERSION_SCALE,
+        &default_opts(),
+    );
+    let uasset_path = format!("Mods/Maps/{}/gen/{}.uasset", level_name, asset_name);
+    pak.write_file(&uasset_path, true, &cooked.uasset)
         .expect("failed to write uasset to pak");
+    let uexp_path = format!("Mods/Maps/{}/gen/{}.uexp", level_name, asset_name);
+    pak.write_file(&uexp_path, true, &cooked.uexp)
+        .expect("failed to write uexp to pak");
+    let abs_path_no_ext = format!("/Game/Mods/Maps/{}/gen/{}", level_name, asset_name);
+    Some((abs_path_no_ext, origin))
+}
 
-    let new_import_idx = {
-        let idx1 = find_import(umap, "Package", "/Game/Mods/Maps/mise/SM_ExampleBox").unwrap();
-        let idx2 = find_import(umap, "StaticMesh", "SM_ExampleBox").unwrap();
-        let mut import1c = umap.get_import(idx1).unwrap().clone();
-        import1c.object_name = umap.add_fname(&format!("/Game/Mods/Maps/slop/{}", name));
-        let idx1c = umap.add_import(import1c);
-        let mut import2c = umap.get_import(idx2).unwrap().clone();
-        import2c.object_name = umap.add_fname(&name);
-        import2c.outer_index = idx1c;
-        umap.add_import(import2c)
-    };
+fn umap_import_static_mesh<C: Read + Seek>(
+    umap: &mut unreal_asset::Asset<C>,
+    path: &str,
+) -> PackageIndex {
+    let last_slash_idx = path.rfind('/').expect(&format!(
+        "invalid input to umap_import_static_mesh: \"{}\"",
+        path
+    ));
+    // Hardcode to find SM_ExampleBox and use it as the reference import.
+    let idx1 = find_import(umap, "Package", "/Game/Mods/Maps/mise/SM_ExampleBox").unwrap();
+    let idx2 = find_import(umap, "StaticMesh", "SM_ExampleBox").unwrap();
+
+    // Clone 'Package' import (contains actual absolute path to asset in pak)
+    let mut import1c = umap.get_import(idx1).unwrap().clone();
+    import1c.object_name = umap.add_fname(path);
+    let idx1c = umap.add_import(import1c);
+
+    // Clone 'StaticMesh' import, which should reference 'Package' import
+    let mut import2c = umap.get_import(idx2).unwrap().clone();
+    let basename = &path[last_slash_idx + 1..];
+    import2c.object_name = umap.add_fname(basename);
+    import2c.outer_index = idx1c;
+
+    // Return the index of the newly-added import.
+    umap.add_import(import2c)
+}
+
+fn umap_add_static_mesh_actor<C: Read + Seek>(
+    umap: &mut unreal_asset::Asset<C>,
+    import_idx: PackageIndex,
+    origin: DVec3,
+) {
+    // Hardcode to find StaticMeshComponent0 and use it as the reference export.
+    let idx1 = find_export(
+        &umap,
+        &vec![
+            with_name("StaticMeshComponent0"),
+            with_import("StaticMesh", "SM_ExampleBox"),
+        ],
+    )
+    .unwrap();
+    let export1 = umap.get_export_mut(idx1).unwrap();
+
+    // Find its parent: the StaticMeshActor.
+    let idx2 = export1.get_base_export().outer_index;
+    let idx1c = clone_export(umap, idx1).unwrap();
+    let idx2c = clone_export(umap, idx2).unwrap();
+    add_actor_to_level(umap, idx2c);
 
     {
-        let idx1 = find_export(
-            &umap,
-            &vec![
-                with_name("StaticMeshComponent0"),
-                with_import("StaticMesh", "SM_ExampleBox"),
-            ],
-        )
-        .unwrap();
-        let export1 = umap.get_export_mut(idx1).unwrap();
-        // find parent StaticMeshActor
-        let idx2 = export1.get_base_export().outer_index;
-        let idx1c = clone_export(umap, idx1).unwrap();
-        let idx2c = clone_export(umap, idx2).unwrap();
-        add_actor(umap, idx2c);
+        // StaticMeshComponent0
+        let export1c = umap.get_export_mut(idx1c).unwrap();
+        let export1c_base = export1c.get_base_export_mut();
+
+        // Point to new parent
+        export1c_base.outer_index = idx2c;
+        export1c_base.create_before_create_dependencies[0] = idx2c;
+
+        // Point to new import
+        export1c_base
+            .create_before_serialization_dependencies
+            .push(import_idx);
         {
-            // StaticMeshComponent0
-            let export1c = umap.get_export_mut(idx1c).unwrap();
-            let export1c_base = export1c.get_base_export_mut();
-            // Point to new parent
-            export1c_base.outer_index = idx2c;
-            export1c_base.create_before_create_dependencies[0] = idx2c;
-            // Point to new import
-            export1c_base
-                .create_before_serialization_dependencies
-                .push(new_import_idx);
-            {
-                let prop = find_obj_property_mut(export1c, "StaticMesh")
-                    .expect("couldn't find StaticMesh property");
-                prop.value = new_import_idx;
-            }
-            // Set world position
-            {
-                let prop = find_vec_property_mut(export1c, "RelativeLocation")
-                    .expect("couldn't find RelativeLocation property");
-                prop.value.x.0 = origin.x;
-                prop.value.y.0 = origin.y;
-                prop.value.z.0 = origin.z;
-            }
+            let prop = find_obj_property_mut(export1c, "StaticMesh")
+                .expect("couldn't find StaticMesh property");
+            prop.value = import_idx;
         }
+        // Set world position
         {
-            // StaticMeshActor
-            let export2c = umap.get_export_mut(idx2c).unwrap();
-            // Point to new child
-            export2c
-                .get_base_export_mut()
-                .create_before_serialization_dependencies[0] = idx1c;
+            let prop = find_vec_property_mut(export1c, "RelativeLocation")
+                .expect("couldn't find RelativeLocation property");
+            prop.value.x.0 = origin.x;
+            prop.value.y.0 = origin.y;
+            prop.value.z.0 = origin.z;
         }
+    }
+
+    {
+        // StaticMeshActor
+        let export2c = umap.get_export_mut(idx2c).unwrap();
+        // Point to new child
+        export2c
+            .get_base_export_mut()
+            .create_before_serialization_dependencies[0] = idx1c;
     }
 }
 
@@ -313,8 +345,21 @@ fn main() {
 
     let start = Instant::now();
     for ent in ast.0 {
-        for (i, brush) in ent.brushes.0.iter().enumerate() {
-            process_brush(&mut umap, &mut pak, i, brush);
+        for prop in ent.properties.0 {
+            if prop.key == "classname" {
+                if prop.value == "worldspawn" {
+                    for (i, brush) in ent.brushes.0.iter().enumerate() {
+                        let name = format!("WorldBrush{}", i);
+                        let (abs_path, origin) =
+                            pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
+                        let idx = umap_import_static_mesh(&mut umap, &abs_path);
+                        umap_add_static_mesh_actor(&mut umap, idx, origin);
+                    }
+                }
+                if prop.value == "trigger_hazard" {
+                    // TODO
+                }
+            }
         }
     }
     let elapsed = start.elapsed();
