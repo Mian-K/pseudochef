@@ -582,6 +582,70 @@ mod tests {
         }
     }
 
+    /// The 10x10x10 axis-aligned box brush used throughout these tests,
+    /// with outward-wound faces.
+    fn box_brush() -> Brush {
+        let centroid = DVec3::new(5.0, 5.0, 5.0);
+        Brush::new(vec![
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 10.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 10.0),
+                point(10.0, 0.0, 10.0),
+                point(0.0, 10.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(10.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 10.0, 0.0),
+                point(0.0, 10.0, 10.0),
+                point(10.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(0.0, 0.0, 0.0),
+                point(0.0, 0.0, 10.0),
+                point(0.0, 10.0, 0.0),
+                centroid,
+            ),
+            plane_outward(
+                point(10.0, 0.0, 0.0),
+                point(10.0, 10.0, 0.0),
+                point(10.0, 0.0, 10.0),
+                centroid,
+            ),
+        ])
+    }
+
+    /// A triangular prism ("wedge"): right-triangle cross-section in xy
+    /// extruded along z, uniformly scaled by `s`. Its slanted hypotenuse
+    /// face meets everything else at non-right angles.
+    fn wedge_brush(s: f64) -> Brush {
+        let centroid = DVec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0) * s;
+        let a = point(0.0, 0.0, 0.0);
+        let b = point(10.0 * s, 0.0, 0.0);
+        let c = point(0.0, 10.0 * s, 0.0);
+        let a2 = point(0.0, 0.0, 10.0 * s);
+        let b2 = point(10.0 * s, 0.0, 10.0 * s);
+        let c2 = point(0.0, 10.0 * s, 10.0 * s);
+        Brush::new(vec![
+            plane_outward(a, b, c, centroid),    // bottom cap
+            plane_outward(a2, c2, b2, centroid), // top cap
+            plane_outward(a, a2, b2, centroid),  // side face along AB (y = 0)
+            plane_outward(a, c, c2, centroid),   // side face along AC (x = 0)
+            plane_outward(b, b2, c2, centroid),  // hypotenuse side face along BC
+        ])
+    }
+
     #[test]
     fn convert_to_mesh_bakes_outward_facing_normals_without_flipping_winding() {
         // Regression test: with no explicit normals, pseudocooker derives a
@@ -596,46 +660,7 @@ mod tests {
         // winding at all -- and therefore without risking the
         // culling/collision correctness the watertightness tests above
         // already cover.
-        let centroid = DVec3::new(5.0, 5.0, 5.0);
-        let planes = vec![
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 10.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 10.0),
-                point(10.0, 0.0, 10.0),
-                point(0.0, 10.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 10.0, 0.0),
-                point(0.0, 10.0, 10.0),
-                point(10.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                point(0.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(10.0, 0.0, 0.0),
-                point(10.0, 10.0, 0.0),
-                point(10.0, 0.0, 10.0),
-                centroid,
-            ),
-        ];
-        let brush = Brush::new(planes);
+        let brush = box_brush();
         let (mesh, _origin) = convert_to_mesh(&brush, 0.0);
 
         let mesh_centroid = mesh
@@ -665,46 +690,7 @@ mod tests {
     fn convert_to_mesh_handles_orthogonal_box() {
         // A plain axis-aligned box: every vertex is formed by 3 mutually
         // perpendicular faces, the one case the old angle-based gate handled.
-        let centroid = DVec3::new(5.0, 5.0, 5.0);
-        let planes = vec![
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 10.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 10.0),
-                point(10.0, 0.0, 10.0),
-                point(0.0, 10.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 10.0, 0.0),
-                point(0.0, 10.0, 10.0),
-                point(10.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                point(0.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(10.0, 0.0, 0.0),
-                point(10.0, 10.0, 0.0),
-                point(10.0, 0.0, 10.0),
-                centroid,
-            ),
-        ];
-        let brush = Brush::new(planes);
+        let brush = box_brush();
         let (mesh, _origin) = convert_to_mesh(&brush, 0.0);
 
         // 6 quad faces, triangulated into 2 triangles each (no interior
@@ -717,46 +703,7 @@ mod tests {
 
     #[test]
     fn convert_to_mesh_returns_deterministic_origin_relative_to_a_brush_corner() {
-        let centroid = DVec3::new(5.0, 5.0, 5.0);
-        let planes = vec![
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 10.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 10.0),
-                point(10.0, 0.0, 10.0),
-                point(0.0, 10.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 10.0, 0.0),
-                point(0.0, 10.0, 10.0),
-                point(10.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                point(0.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(10.0, 0.0, 0.0),
-                point(10.0, 10.0, 0.0),
-                point(10.0, 0.0, 10.0),
-                centroid,
-            ),
-        ];
-        let brush = Brush::new(planes);
+        let brush = box_brush();
 
         let (mesh1, origin1) = convert_to_mesh(&brush, 0.0);
         let (_mesh2, origin2) = convert_to_mesh(&brush, 0.0);
@@ -786,22 +733,7 @@ mod tests {
         // The old angle-based gate could only ever find the 2 vertices where
         // the hypotenuse face isn't involved; it would silently drop the other
         // 4 vertices of the shape.
-        let centroid = DVec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0);
-        let a = point(0.0, 0.0, 0.0);
-        let b = point(10.0, 0.0, 0.0);
-        let c = point(0.0, 10.0, 0.0);
-        let a2 = point(0.0, 0.0, 10.0);
-        let b2 = point(10.0, 0.0, 10.0);
-        let c2 = point(0.0, 10.0, 10.0);
-
-        let planes = vec![
-            plane_outward(a, b, c, centroid),    // bottom cap
-            plane_outward(a2, c2, b2, centroid), // top cap
-            plane_outward(a, a2, b2, centroid),  // side face along AB (y = 0)
-            plane_outward(a, c, c2, centroid),   // side face along AC (x = 0)
-            plane_outward(b, b2, c2, centroid),  // hypotenuse side face along BC
-        ];
-        let brush = Brush::new(planes);
+        let brush = wedge_brush(1.0);
         let (mesh, _origin) = convert_to_mesh(&brush, 0.0);
 
         // 2 triangular caps (1 tri each) + 3 rectangular sides (2 tris each).
@@ -815,46 +747,7 @@ mod tests {
     fn convert_to_mesh_subdivides_faces_with_small_spacing() {
         // Same box as above, but with a spacing small enough that each
         // 10x10 face should get extra interior vertices.
-        let centroid = DVec3::new(5.0, 5.0, 5.0);
-        let planes = vec![
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 10.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 10.0),
-                point(10.0, 0.0, 10.0),
-                point(0.0, 10.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 10.0, 0.0),
-                point(0.0, 10.0, 10.0),
-                point(10.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                point(0.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(10.0, 0.0, 0.0),
-                point(10.0, 10.0, 0.0),
-                point(10.0, 0.0, 10.0),
-                centroid,
-            ),
-        ];
-        let brush = Brush::new(planes);
+        let brush = box_brush();
 
         let (coarse, _coarse_origin) = convert_to_mesh(&brush, 0.0);
         let (fine, _fine_origin) = convert_to_mesh(&brush, 3.0);
@@ -1006,62 +899,9 @@ mod tests {
         // Any closed brush mesh should be watertight: every edge shared by
         // exactly two triangles. Checked across a right-angle box, a
         // non-orthogonal wedge, and a subdivided box.
-        let centroid = DVec3::new(5.0, 5.0, 5.0);
-        let box_planes = vec![
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 10.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 10.0),
-                point(10.0, 0.0, 10.0),
-                point(0.0, 10.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 10.0, 0.0),
-                point(0.0, 10.0, 10.0),
-                point(10.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                point(0.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(10.0, 0.0, 0.0),
-                point(10.0, 10.0, 0.0),
-                point(10.0, 0.0, 10.0),
-                centroid,
-            ),
-        ];
-        let box_brush = Brush::new(box_planes);
+        let box_brush = box_brush();
 
-        let wedge_centroid = DVec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0);
-        let a = point(0.0, 0.0, 0.0);
-        let b = point(10.0, 0.0, 0.0);
-        let c = point(0.0, 10.0, 0.0);
-        let a2 = point(0.0, 0.0, 10.0);
-        let b2 = point(10.0, 0.0, 10.0);
-        let c2 = point(0.0, 10.0, 10.0);
-        let wedge_planes = vec![
-            plane_outward(a, b, c, wedge_centroid),
-            plane_outward(a2, c2, b2, wedge_centroid),
-            plane_outward(a, a2, b2, wedge_centroid),
-            plane_outward(a, c, c2, wedge_centroid),
-            plane_outward(b, b2, c2, wedge_centroid),
-        ];
-        let wedge_brush = Brush::new(wedge_planes);
+        let wedge_brush = wedge_brush(1.0);
 
         for (brush, spacing) in [(&box_brush, 0.0), (&box_brush, 3.0), (&wedge_brush, 0.0)] {
             let (mesh, _origin) = convert_to_mesh(brush, spacing);
@@ -1170,21 +1010,7 @@ mod tests {
         // segment count due to a few ULPs of noise from each face's own 2D
         // reprojection, leaving a hole that welding couldn't fix.
         let s = 9.6_f64; // 10 * 9.6 = 96 = 1.5 * 64
-        let wedge_centroid = DVec3::new(10.0 / 3.0, 10.0 / 3.0, 5.0) * s;
-        let a = point(0.0, 0.0, 0.0);
-        let b = point(10.0 * s, 0.0, 0.0);
-        let c = point(0.0, 10.0 * s, 0.0);
-        let a2 = point(0.0, 0.0, 10.0 * s);
-        let b2 = point(10.0 * s, 0.0, 10.0 * s);
-        let c2 = point(0.0, 10.0 * s, 10.0 * s);
-        let wedge_planes = vec![
-            plane_outward(a, b, c, wedge_centroid),
-            plane_outward(a2, c2, b2, wedge_centroid),
-            plane_outward(a, a2, b2, wedge_centroid),
-            plane_outward(a, c, c2, wedge_centroid),
-            plane_outward(b, b2, c2, wedge_centroid),
-        ];
-        let wedge_brush = Brush::new(wedge_planes);
+        let wedge_brush = wedge_brush(s);
         let (mesh, _origin) = convert_to_mesh(&wedge_brush, 64.0);
         let boundary_edges = find_boundary_edges(&mesh);
         assert!(
@@ -1199,46 +1025,7 @@ mod tests {
         // near-duplicate (but not identical) positions: before welding,
         // adjacent faces reconstructed their shared edge's vertices
         // independently and landed a few float32-ULPs apart.
-        let centroid = DVec3::new(5.0, 5.0, 5.0);
-        let planes = vec![
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 10.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 10.0),
-                point(10.0, 0.0, 10.0),
-                point(0.0, 10.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(10.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 10.0, 0.0),
-                point(0.0, 10.0, 10.0),
-                point(10.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(0.0, 0.0, 0.0),
-                point(0.0, 0.0, 10.0),
-                point(0.0, 10.0, 0.0),
-                centroid,
-            ),
-            plane_outward(
-                point(10.0, 0.0, 0.0),
-                point(10.0, 10.0, 0.0),
-                point(10.0, 0.0, 10.0),
-                centroid,
-            ),
-        ];
-        let brush = Brush::new(planes);
+        let brush = box_brush();
         let (mesh, _origin) = convert_to_mesh(&brush, 3.0);
 
         for i in 0..mesh.positions.len() {
