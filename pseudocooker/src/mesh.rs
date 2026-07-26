@@ -21,9 +21,8 @@
 //!     wrong handedness would only flip normal-map Y, not geometry.
 //!   - If no normals are supplied, flat per-face normals are computed from
 //!     the triangle winding. If no UVs are supplied, (0,0) is used everywhere.
-//!   - Meters -> centimeters unit conversion (scale=100, UE's base unit) is
-//!     applied by default alongside the axis conversion -- see
-//!     `build_render_mesh`'s docs for both.
+//!   - Positions are passed through as-is: input is expected to already be
+//!     in UE's axis convention and centimeter units.
 
 use std::collections::HashMap;
 
@@ -164,8 +163,8 @@ fn python_round(x: f64) -> f64 {
 }
 
 pub fn build_render_mesh(mesh: &MeshInput) -> RenderMesh {
-    let positions_in: Vec<Vec3> = mesh.positions.clone();
-    let normals_in: Vec<Vec3> = mesh.normals.clone();
+    let positions_in: &Vec<Vec3> = &mesh.positions;
+    let normals_in: &Vec<Vec3> = &mesh.normals;
     let uvs_in: &Vec<Vec2> = &mesh.uvs;
     let faces = &mesh.faces;
 

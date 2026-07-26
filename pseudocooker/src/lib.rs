@@ -68,18 +68,9 @@ impl CookedAsset {
 /// `asset_name` (becomes `/Game/<asset_name>` and the top-level export's
 /// object name).
 ///
-/// `convert_axes`: true (default in the original CLI) converts a standard
-/// right-handed, Y-up-authored mesh (the common DCC/asset-store convention)
-/// into UE5's left-handed, Z-up convention -- see [`mesh::build_render_mesh`]'s
-/// docs for the full handedness proof. This also corrects triangle winding
-/// as an inherent side effect of the axis swap.
-///
-/// `scale`: 100.0 (default in the original CLI) converts meters to
-/// centimeters (UE's base unit). Pass 1.0 for input already authored in
-/// centimeters.
-///
-/// `options`: GUID overrides for reproducible output; leave default for
-/// fresh random GUIDs on every call (matching real cooks).
+/// Input is expected to already be in UE's own conventions: left-handed,
+/// Z-up axes and centimeter units. Package GUIDs are freshly randomized on
+/// every call (matching real cooks).
 pub fn cook(mesh_input: &MeshInput, asset_name: &str) -> CookedAsset {
     let render_mesh = mesh::build_render_mesh(mesh_input);
     let (uasset, uexp) = package::cook_package(asset_name, &render_mesh, &CookOptions::default());
