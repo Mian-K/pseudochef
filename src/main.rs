@@ -509,13 +509,16 @@ fn main() {
             None,
         );
 
+    let mut num_world_brushes = 0;
+    let mut num_hazard_brushes = 0;
     let start = Instant::now();
     for ent in ast.0 {
         for prop in ent.properties.0 {
             if prop.key == "classname" {
                 if prop.value == "worldspawn" {
-                    for (i, brush) in ent.brushes.0.iter().enumerate() {
-                        let name = format!("WorldBrush{}", i);
+                    for brush in &ent.brushes.0 {
+                        num_world_brushes += 1;
+                        let name = format!("WorldBrush{}", num_world_brushes);
                         let (abs_path, origin) =
                             pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
                         let idx = add_static_mesh_import(&mut umap, &abs_path);
@@ -523,9 +526,9 @@ fn main() {
                     }
                 }
                 if prop.value == "trigger_hazard" {
-                    for (i, brush) in ent.brushes.0.iter().enumerate() {
-                        // make this counter global
-                        let name = format!("HazardBrush{}", i);
+                    for brush in &ent.brushes.0 {
+                        num_hazard_brushes += 1;
+                        let name = format!("HazardBrush{}", num_hazard_brushes);
                         let (abs_path, origin) =
                             pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
                         let idx = add_static_mesh_import(&mut umap, &abs_path);
