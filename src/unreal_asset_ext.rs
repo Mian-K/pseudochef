@@ -11,13 +11,6 @@ use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::reader::ArchiveTrait;
 use unreal_asset::types::PackageIndex;
 
-macro_rules! debug_println {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        println!($($arg)*);
-    };
-}
-
 fn export_clone_counter() -> i32 {
     static COUNT: AtomicI32 = AtomicI32::new(100);
     COUNT.fetch_add(1, Ordering::Relaxed)
@@ -180,23 +173,35 @@ pub(crate) fn deep_clone_export<C: Read + Seek>(
 
 fn remove_actors_from_level<C: Read + Seek>(
     asset: &mut unreal_asset::Asset<C>,
-    to_remove: &HashSet<PackageIndex>,
+    to_remove: &[PackageIndex],
 ) {
+    let to_remove: HashSet<&PackageIndex> = to_remove.iter().collect();
     let level_idx = find_export(asset, &vec![with_name("PersistentLevel")]).unwrap();
     let export = asset.get_export_mut(level_idx).unwrap();
     let unreal_asset::Export::LevelExport(level_export) = export else {
         panic!("PersistentLevel was not a LevelExport");
     };
+    let mut removed_idxs = vec![];
     // Preserve order: the engine requires WorldSettings to stay at Actors[0]
     // (ULevel::PostLoad does WorldSettings = Cast<AWorldSettings>(Actors[0])).
     level_export.actors.retain(|idx| {
         if !to_remove.contains(idx) {
             return true;
         } else {
-            debug_println!("Removed actor {} from PersistentLevel", idx);
+            removed_idxs.push(*idx);
             return false;
         }
     });
+    #[cfg(debug_assertions)]
+    for idx in removed_idxs {
+        let name = asset
+            .get_export(idx)
+            .unwrap()
+            .get_base_export()
+            .object_name
+            .get_owned_content();
+        println!("Removed {}: {} from PersistentLevel", idx, name);
+    }
 }
 
 /// Turns the export subtree rooted at `root` into inert placeholder exports and removes deleted
@@ -206,6 +211,7 @@ pub(crate) fn deep_delete_export<C: Read + Seek>(
     root: PackageIndex,
 ) {
     let doomed = collect_owned_exports(umap, root);
+    remove_actors_from_level(umap, &doomed);
 
     let class_idx = find_import(umap, "Class", "SceneComponent").unwrap();
     let cdo_idx = match find_import(umap, "SceneComponent", "Default__SceneComponent") {
@@ -274,8 +280,8 @@ pub(crate) fn deep_delete_export<C: Read + Seek>(
             }
         }
     }
-    remove_actors_from_level(umap, &doomed_set);
-    debug_println!("- deleted {} more dependent exports", tombstone_number - 1);
+    #[cfg(debug_assertions)]
+    println!("- (deleted {} more dependent exports)", tombstone_number - 1);
 }
 
 #[cfg(test)]
