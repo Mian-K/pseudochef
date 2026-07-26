@@ -80,8 +80,8 @@ impl CookedAsset {
 ///
 /// `options`: GUID overrides for reproducible output; leave default for
 /// fresh random GUIDs on every call (matching real cooks).
-pub fn cook(mesh_input: &MeshInput, asset_name: &str, convert_axes: bool, scale: f64, options: &CookOptions) -> CookedAsset {
-    let render_mesh = mesh::build_render_mesh(mesh_input, convert_axes, scale);
-    let (uasset, uexp) = package::cook_package(asset_name, &render_mesh, options);
+pub fn cook(mesh_input: &MeshInput, asset_name: &str) -> CookedAsset {
+    let render_mesh = mesh::build_render_mesh(mesh_input);
+    let (uasset, uexp) = package::cook_package(asset_name, &render_mesh, &CookOptions::default());
     CookedAsset { uasset, uexp, ubulk: Vec::new() }
 }

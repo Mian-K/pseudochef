@@ -163,42 +163,13 @@ fn python_round(x: f64) -> f64 {
     }
 }
 
-/// Converts a vector (position OR direction, e.g. a normal) from a standard
-/// OBJ's right-handed, Y-up convention to UE5's left-handed, Z-up
-/// convention: (x, y, z) -> (x, z, y). Pure axis swap, no sign negation --
-/// see cook_mesh.py's `_obj_to_ue_axes` docstring for the handedness proof.
-/// This also flips triangle winding as an inherent side effect (same
-/// docstring) -- no separate winding-flip step exists or is needed.
-fn obj_to_ue_axes(v: Vec3) -> Vec3 {
-    [v[0], v[2], v[1]]
-}
-
-/// convert_axes: true (default) applies `obj_to_ue_axes` to every position
-/// and normal -- correct for a standard, right-handed, Y-up-authored mesh
-/// (the common case: DCC tools, asset stores, etc). Set false only for data
-/// already in UE's own coordinate convention.
-///
-/// scale: 100.0 (default) converts meters (the near-universal OBJ/DCC
-/// convention) to centimeters (UE's base unit; a UE "unit" is 1cm). Applied
-/// to POSITIONS ONLY -- normals are directions, not distances, and must
-/// stay unit-length.
-pub fn build_render_mesh(mesh: &MeshInput, convert_axes: bool, scale: f64) -> RenderMesh {
-    let mut positions_in: Vec<Vec3> = mesh.positions.clone();
-    let mut normals_in: Vec<Vec3> = mesh.normals.clone();
+pub fn build_render_mesh(mesh: &MeshInput) -> RenderMesh {
+    let positions_in: Vec<Vec3> = mesh.positions.clone();
+    let normals_in: Vec<Vec3> = mesh.normals.clone();
     let uvs_in: &Vec<Vec2> = &mesh.uvs;
     let faces = &mesh.faces;
 
-    if convert_axes {
-        positions_in = positions_in.iter().map(|&p| obj_to_ue_axes(p)).collect();
-        normals_in = normals_in.iter().map(|&n| obj_to_ue_axes(n)).collect();
-    }
-    if scale != 1.0 {
-        positions_in = positions_in.iter().map(|p| [p[0] * scale, p[1] * scale, p[2] * scale]).collect();
-    }
-
-    // Triangulate (fan) and group by material. Winding is left exactly as
-    // authored -- see convert_axes/obj_to_ue_axes above for why no separate
-    // winding correction is needed here.
+    // Triangulate (fan) and group by material.
     let mut tris_by_material: std::collections::BTreeMap<usize, Vec<(Corner, Corner, Corner)>> =
         std::collections::BTreeMap::new();
     for face in faces {

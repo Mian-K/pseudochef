@@ -10,7 +10,7 @@ use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::types::PackageIndex;
 
 mod brush_to_mesh;
-use brush_to_mesh::{tb_space_to_unreal_space, convert_to_mesh};
+use brush_to_mesh::{convert_to_mesh, tb_space_to_unreal_space};
 
 mod unreal_asset_ext;
 use unreal_asset_ext::{deep_clone_export, deep_delete_export};
@@ -66,14 +66,6 @@ fn slice_to_string<T: std::fmt::Display>(v: &[T]) -> String {
         .map(|i| i.to_string())
         .collect::<Vec<String>>()
         .join(", ")
-}
-
-fn default_opts() -> pseudocooker::CookOptions {
-    pseudocooker::CookOptions {
-        body_setup_guid: None,
-        lighting_guid: None,
-        package_guid: None,
-    }
 }
 
 type UnrealExportConstraint<'a, C> = Box<
@@ -225,13 +217,7 @@ fn pak_add_brush<W: Write + Seek>(
     asset_name: &str,
 ) -> Option<(String, DVec3)> {
     let (mesh, origin) = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
-    let cooked = pseudocooker::cook(
-        &mesh,
-        asset_name,
-        false,
-        1.0,
-        &default_opts(),
-    );
+    let cooked = pseudocooker::cook(&mesh, asset_name);
     let uasset_path = format!("Mods/Maps/{}/gen/{}.uasset", level_name, asset_name);
     pak.write_file(&uasset_path, true, &cooked.uasset)
         .expect("failed to write uasset to pak");
