@@ -165,6 +165,22 @@ fn find_obj_property<'a>(
     return result;
 }
 
+fn find_name_property_mut<'a>(
+    export: &'a mut unreal_asset::Export<PackageIndex>,
+    key: &str,
+) -> Option<&'a mut unreal_asset::properties::str_property::NameProperty> {
+    let mut result = None;
+    let props = &mut export.get_normal_export_mut().unwrap().properties;
+    for prop in props {
+        if let unreal_asset::properties::Property::NameProperty(name_prop) = prop {
+            if name_prop.name.get_content(|content| content == key) {
+                result = Some(name_prop);
+            }
+        }
+    }
+    return result;
+}
+
 fn find_obj_property_mut<'a>(
     export: &'a mut unreal_asset::Export<PackageIndex>,
     name: &str,
@@ -255,10 +271,14 @@ fn add_static_mesh_import<C: Read + Seek>(
     umap.add_import(import2c)
 }
 
-fn add_player_start<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, origin: DVec3) {
+fn add_player_start<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, origin: DVec3, tag: &str) {
     let idx = find_export(umap, &vec![with_name("PlayerStart")]).unwrap();
     let idx = deep_clone_export(umap, idx);
     add_actor_to_level(umap, idx);
+
+    let tag = umap.add_fname(tag);
+    let export = umap.get_export_mut(idx).unwrap();
+    set_name_property(export, "PlayerStartTag", tag);
 
     let root = get_linked_export_mut(umap, idx, "RootComponent").unwrap();
     set_location(root, origin);
@@ -292,6 +312,11 @@ fn get_linked_export_mut<'a, C: Read + Seek>(
     let prop = find_obj_property(export, object_name)?;
     assert!(prop.value.index > 0); // must be export
     umap.get_export_mut(prop.value)
+}
+
+fn set_name_property(export: &mut unreal_asset::Export<PackageIndex>, key: &str, value: unreal_asset::types::FName) {
+    let prop = find_name_property_mut(export, key).unwrap();
+    prop.value = value;
 }
 
 fn set_obj_property(
@@ -411,10 +436,13 @@ fn main() {
                 }
             }
             "info_player_start" => {
-                let numbers: Vec<f64> = props["origin"].split_whitespace().map(|n| n.parse().unwrap()).collect();
+                let numbers: Vec<f64> = props["origin"]
+                    .split_whitespace()
+                    .map(|n| n.parse().unwrap())
+                    .collect();
                 let origin = DVec3::from_slice(&numbers);
                 let origin = tb_space_to_unreal_space(origin);
-                add_player_start(&mut umap, origin);
+                add_player_start(&mut umap, origin, &props["targetname"]);
             }
             _ => {}
         };
