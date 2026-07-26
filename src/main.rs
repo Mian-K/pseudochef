@@ -1,5 +1,6 @@
 use glam::DVec3;
 use shalrath::parser::repr::parse_map;
+use std::collections::HashSet;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
 use std::time::Instant;
@@ -53,6 +54,19 @@ const MISE_UEXP: &[u8] = include_bytes!("mise/mise.uexp");
 const FACE_VERTEX_SPACING: f64 = 64.0;
 const MESH_CONVERSION_SCALE: f64 = 4.0;
 
+#[allow(dead_code)]
+#[derive(Debug)]
+struct Error {
+    msg: String,
+}
+
+fn slice_to_string<T: std::fmt::Display>(v: &[T]) -> String {
+    v.iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
 fn default_opts() -> pseudocooker::CookOptions {
     pseudocooker::CookOptions {
         body_setup_guid: None,
@@ -97,6 +111,7 @@ fn with_import<'a, C: Read + Seek>(
             .get_content(|content| content == import_name);
     })
 }
+
 fn with_name<'a, C: Read + Seek>(name: &'a str) -> UnrealExportConstraint<'a, C> {
     Box::new(move |_, export| {
         export
@@ -190,6 +205,29 @@ fn find_import<C: Read + Seek>(
         }
     }
     return None;
+}
+
+fn remove_actors_from_level<C: Read + Seek>(
+    asset: &mut unreal_asset::Asset<C>,
+    idxs: &[PackageIndex],
+) {
+    let to_remove: HashSet<&PackageIndex> = idxs.iter().collect();
+
+    let level_idx = find_export(asset, &vec![with_name("PersistentLevel")]).unwrap();
+    let export = asset.get_export_mut(level_idx).unwrap();
+    let unreal_asset::Export::LevelExport(level_export) = export else {
+        panic!("PersistentLevel was not a LevelExport");
+    };
+    let actors: HashSet<&PackageIndex> = level_export.actors.iter().collect();
+    level_export.actors = (&actors - &to_remove)
+        .into_iter()
+        .map(|idx| idx.clone())
+        .collect();
+    #[cfg(debug_assertions)]
+    println!(
+        "remaining actors: {}",
+        slice_to_string(&level_export.actors)
+    );
 }
 
 fn add_actor_to_level<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageIndex) {
@@ -402,6 +440,26 @@ fn main() {
         let idx = find_export(&umap, &vec![with_name("mise")]).expect("couldn't find mise");
         let export = umap.get_export_mut(idx).unwrap();
         export.get_base_export_mut().object_name = fname;
+    }
+
+    // Remove reference actors.
+    {
+        let idxs = vec![
+            find_export(&umap, &vec![with_name("BP_Hazard_C")]).unwrap(),
+            find_export(&umap, &vec![with_name("BP_SavePoint_C")]).unwrap(),
+            find_export(&umap, &vec![with_name("BP_JumpBubble_C")]).unwrap(),
+            find_export(&umap, &vec![with_name("BP_ExaminableGrave_C")]).unwrap(),
+            find_export(
+                &umap,
+                &vec![with_name(
+                    "ChildActor_GEN_VARIABLE_BP_ExamineTextPopup_C_CAT",
+                )],
+            )
+            .unwrap(),
+        ];
+        #[cfg(debug_assertions)]
+        println!("Removing reference actors: {}", slice_to_string(&idxs),);
+        remove_actors_from_level(&mut umap, &idxs);
     }
 
     let mut final_umap = std::io::Cursor::new(vec![]);
