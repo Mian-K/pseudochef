@@ -230,12 +230,12 @@ fn pak_add_brush<W: Write + Seek>(
     Some((abs_path_no_ext, origin))
 }
 
-fn umap_import_static_mesh<C: Read + Seek>(
+fn add_static_mesh_import<C: Read + Seek>(
     umap: &mut unreal_asset::Asset<C>,
     path: &str,
 ) -> PackageIndex {
     let last_slash_idx = path.rfind('/').expect(&format!(
-        "invalid input to umap_import_static_mesh: \"{}\"",
+        "invalid input to add_static_mesh_import: \"{}\"",
         path
     ));
     // Hardcode to find SM_ExampleBox and use it as the reference import.
@@ -257,7 +257,28 @@ fn umap_import_static_mesh<C: Read + Seek>(
     umap.add_import(import2c)
 }
 
-fn umap_add_static_mesh_actor<C: Read + Seek>(
+fn deep_clone_export<C: Read + Seek>(
+    umap: &mut unreal_asset::Asset<C>,
+    idx: PackageIndex,
+) -> PackageIndex {
+    // TODO implement me
+    PackageIndex::new(0)
+}
+
+fn add_hazard_actor<C: Read + Seek>(
+    umap: &mut unreal_asset::Asset<C>,
+    import_idx: PackageIndex,
+    origin: DVec3,
+) {
+    // Hardcode to find BP_Hazard_C and use it as the reference export.
+    let idx = find_export(&umap, &vec![with_name("BP_Hazard_C")]).unwrap();
+    let idx = deep_clone_export(umap, idx);
+    add_actor_to_level(umap, idx);
+
+    // TODO put import_idx and origin in deep cloned export
+}
+
+fn add_static_mesh_actor<C: Read + Seek>(
     umap: &mut unreal_asset::Asset<C>,
     import_idx: PackageIndex,
     origin: DVec3,
@@ -352,12 +373,19 @@ fn main() {
                         let name = format!("WorldBrush{}", i);
                         let (abs_path, origin) =
                             pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
-                        let idx = umap_import_static_mesh(&mut umap, &abs_path);
-                        umap_add_static_mesh_actor(&mut umap, idx, origin);
+                        let idx = add_static_mesh_import(&mut umap, &abs_path);
+                        add_static_mesh_actor(&mut umap, idx, origin);
                     }
                 }
                 if prop.value == "trigger_hazard" {
-                    // TODO
+                    for (i, brush) in ent.brushes.0.iter().enumerate() {
+                        // make this counter global
+                        let name = format!("HazardBrush{}", i);
+                        let (abs_path, origin) =
+                            pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
+                        let idx = add_static_mesh_import(&mut umap, &abs_path);
+                        add_hazard_actor(&mut umap, idx, origin);
+                    }
                 }
             }
         }
