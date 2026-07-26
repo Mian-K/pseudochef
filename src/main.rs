@@ -19,14 +19,6 @@ use unreal_asset_ext::{deep_clone_export, deep_delete_export};
 mod obj_export;
 
 const MISE_FILES: &[(&str, &[u8])] = &[
-    (
-        "BP_ExaminableGrave.uasset",
-        include_bytes!("mise/BP_ExaminableGrave.uasset"),
-    ),
-    (
-        "BP_ExaminableGrave.uexp",
-        include_bytes!("mise/BP_ExaminableGrave.uexp"),
-    ),
     ("BP_Hazard.uasset", include_bytes!("mise/BP_Hazard.uasset")),
     ("BP_Hazard.uexp", include_bytes!("mise/BP_Hazard.uexp")),
     ("M_HazMat.uasset", include_bytes!("mise/M_HazMat.uasset")),
