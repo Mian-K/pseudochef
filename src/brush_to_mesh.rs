@@ -8,7 +8,7 @@ const TB_TO_UNREAL_SCALE: f32 = 4.0;
 fn dvec3(p: shalrath::repr::Point) -> DVec3 {
     DVec3::new(p.x as f64, p.y as f64, p.z as f64)
 }
-fn calculate_normal(plane: shalrath::repr::TrianglePlane) -> DVec3 {
+fn calculate_normal(plane: &shalrath::repr::TrianglePlane) -> DVec3 {
     let p0 = dvec3(plane.v0);
     let p1 = dvec3(plane.v1);
     let p2 = dvec3(plane.v2);
@@ -73,19 +73,8 @@ pub fn convert_to_mesh(
     let mut brush = mirror_xz(&brush);
     scale_brush(&mut brush, TB_TO_UNREAL_SCALE);
 
-    // TODO dedup this normal calculation
-    // TODO double check that the normals are correct
-    let mut vertices = vec![vec![]; brush.0.len()];
-    let mut normals: Vec<DVec3> = vec![];
-    for plane in &brush.0 {
-        normals.push(calculate_normal(plane.plane));
-    }
-    let planes_and_normals: Vec<_> = brush
-        .0
-        .iter()
-        .enumerate()
-        .map(|(i, plane)| (i, plane.plane, calculate_normal(plane.plane)))
-        .collect();
+    let planes: Vec<_> = brush.0.iter().map(|plane| plane.plane).collect();
+    let normals: Vec<_> = planes.iter().map(|plane| calculate_normal(plane)).collect();
     // Determinant threshold for treating three plane normals as linearly independent
     // (i.e. the planes meet at a unique point rather than being parallel/degenerate).
     const DET_EPSILON: f64 = 1e-6;
@@ -109,10 +98,11 @@ pub fn convert_to_mesh(
     // points well outside the brush, the mean landed outside a plane, and
     // that plane's sign came out inverted -- rejecting every true vertex not
     // on the plane itself and leaving most faces empty.)
-    for c in planes_and_normals.iter().combinations(3) {
-        let (i0, p0, n0) = c[0];
-        let (i1, p1, n1) = c[1];
-        let (i2, p2, n2) = c[2];
+    let mut vertices = vec![vec![]; brush.0.len()];
+    for c in planes.iter().zip(normals.iter()).enumerate().combinations(3) {
+        let (i0, (p0, n0)) = c[0];
+        let (i1, (p1, n1)) = c[1];
+        let (i2, (p2, n2)) = c[2];
         let x0 = dvec3(p0.v0);
         let x1 = dvec3(p1.v0);
         let x2 = dvec3(p2.v0);
@@ -134,7 +124,7 @@ pub fn convert_to_mesh(
         // lies on the interior side of every plane, not just the three we
         // solved with. This is what makes the intersection test work for any
         // convex brush, not just ones where faces meet at right angles.
-        let is_vertex = planes_and_normals.iter().all(|(_, plane, normal)| {
+        let is_vertex = planes.iter().zip(normals.iter()).all(|(plane, normal)| {
             let x = dvec3(plane.v0);
             let n = normal.normalize();
             // n points inward post-mirror (see above), so interior points have
@@ -145,7 +135,7 @@ pub fn convert_to_mesh(
             continue;
         }
 
-        for &i in &[*i0, *i1, *i2] {
+        for &i in &[i0, i1, i2] {
             let face_vertices = &mut vertices[i];
             // If more than 3 planes intersect at the same vertex, there will be duplicates.
             // This is unlikely with brushes but we account for it anyway.
@@ -570,7 +560,7 @@ mod tests {
     // resulting normal points away from `centroid` (i.e. outward, as brush face
     // normals are expected to be).
     fn plane_outward(v0: Point, v1: Point, v2: Point, centroid: DVec3) -> BrushPlane {
-        let normal = calculate_normal(TrianglePlane { v0, v1, v2 });
+        let normal = calculate_normal(&TrianglePlane { v0, v1, v2 });
         let (v0, v1, v2) = if normal.dot(dvec3(v0) - centroid) < 0.0 {
             (v0, v2, v1)
         } else {
