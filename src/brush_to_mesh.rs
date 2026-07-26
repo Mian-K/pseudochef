@@ -70,11 +70,11 @@ pub fn convert_to_mesh(
     // Unreal uses a left-handed coordinate system with +z pointing up.
     // So, we mirror across the xz-plane when converting.
     // Also, we scale up to visually align with Unreal distance units.
-    let mut brush = mirror_xz(&brush);
+    let mut brush = mirror_xz(brush);
     scale_brush(&mut brush, TB_TO_UNREAL_SCALE);
 
     let planes: Vec<_> = brush.0.iter().map(|plane| plane.plane).collect();
-    let normals: Vec<_> = planes.iter().map(|plane| calculate_normal(plane)).collect();
+    let normals: Vec<_> = planes.iter().map(calculate_normal).collect();
     // Determinant threshold for treating three plane normals as linearly independent
     // (i.e. the planes meet at a unique point rather than being parallel/degenerate).
     const DET_EPSILON: f64 = 1e-6;
@@ -389,7 +389,7 @@ fn triangulate_face(
     let mut triangulation: DelaunayTriangulation<Point2<f64>> = DelaunayTriangulation::new();
     let mut index_of: HashMap<(u64, u64), usize> = HashMap::new();
     for (i, &(x, y)) in points_2d.iter().enumerate() {
-        let (x64, y64) = (x as f64, y as f64);
+        let (x64, y64) = (x, y);
         triangulation
             .insert(Point2::new(x64, y64))
             .expect("face sample points are finite and deduplicated by construction");

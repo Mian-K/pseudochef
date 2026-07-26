@@ -26,7 +26,7 @@ fn clone_export<C: Read + Seek>(
     let new_fname = asset.add_fname_with_number(&new_name, export_clone_counter());
     export.get_base_export_mut().object_name = new_fname;
     asset.asset_data.exports.push(export);
-    return Some(PackageIndex::new(asset.asset_data.exports.len() as i32));
+    Some(PackageIndex::new(asset.asset_data.exports.len() as i32))
 }
 
 // Collects `idx` together with every export it owns, directly or transitively
@@ -176,7 +176,7 @@ fn remove_actors_from_level<C: Read + Seek>(
     to_remove: &[PackageIndex],
 ) {
     let to_remove: HashSet<&PackageIndex> = to_remove.iter().collect();
-    let level_idx = find_export(asset, &vec![with_name("PersistentLevel")]).unwrap();
+    let level_idx = find_export(asset, &[with_name("PersistentLevel")]).unwrap();
     let export = asset.get_export_mut(level_idx).unwrap();
     let unreal_asset::Export::LevelExport(level_export) = export else {
         panic!("PersistentLevel was not a LevelExport");
@@ -186,10 +186,10 @@ fn remove_actors_from_level<C: Read + Seek>(
     // (ULevel::PostLoad does WorldSettings = Cast<AWorldSettings>(Actors[0])).
     level_export.actors.retain(|idx| {
         if !to_remove.contains(idx) {
-            return true;
+            true
         } else {
             removed_idxs.push(*idx);
-            return false;
+            false
         }
     });
     #[cfg(debug_assertions)]

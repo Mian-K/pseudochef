@@ -57,14 +57,13 @@ fn with_import<'a, C: Read + Seek>(
     Box::new(move |asset, export| {
         let mut matching_prop = None;
         for prop in &export.properties {
-            if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
-                if obj_prop
+            if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop
+                && obj_prop
                     .name
                     .get_content(|content| content == obj_prop_name)
                 {
                     matching_prop = Some(obj_prop);
                 }
-            }
         }
 
         let Some(prop) = matching_prop else {
@@ -75,10 +74,10 @@ fn with_import<'a, C: Read + Seek>(
         assert!(prop.value.index < 0);
         let import = asset
             .get_import(prop.value)
-            .expect(&format!("failed to get import {}", prop.value.index));
-        return import
+            .unwrap_or_else(|| panic!("failed to get import {}", prop.value.index));
+        import
             .object_name
-            .get_content(|content| content == import_name);
+            .get_content(|content| content == import_name)
     })
 }
 
@@ -97,11 +96,10 @@ fn find_export<C: Read + Seek>(
 ) -> Option<PackageIndex> {
     let mut maybe_idx = None;
     for (i, export) in asset.asset_data.exports.iter().enumerate() {
-        if let Some(normal_export) = export.get_normal_export() {
-            if constraints.iter().all(|f| f(asset, normal_export)) {
+        if let Some(normal_export) = export.get_normal_export()
+            && constraints.iter().all(|f| f(asset, normal_export)) {
                 maybe_idx = Some(PackageIndex::new((i + 1) as i32));
             }
-        }
     }
     maybe_idx
 }
@@ -113,17 +111,16 @@ fn find_vec_property_mut<'a>(
     let mut result = None;
     let props = &mut export.get_normal_export_mut().unwrap().properties;
     for prop in props {
-        if let unreal_asset::properties::Property::StructProperty(struct_prop) = prop {
-            if struct_prop.name.get_content(|content| content == name) {
+        if let unreal_asset::properties::Property::StructProperty(struct_prop) = prop
+            && struct_prop.name.get_content(|content| content == name) {
                 for prop in &mut struct_prop.value {
                     if let unreal_asset::properties::Property::VectorProperty(vec_prop) = prop {
                         result = Some(vec_prop);
                     }
                 }
             }
-        }
     }
-    return result;
+    result
 }
 
 fn find_obj_property<'a>(
@@ -133,13 +130,12 @@ fn find_obj_property<'a>(
     let mut result = None;
     let props = &export.get_normal_export().unwrap().properties;
     for prop in props {
-        if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
-            if obj_prop.name.get_content(|content| content == name) {
+        if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop
+            && obj_prop.name.get_content(|content| content == name) {
                 result = Some(obj_prop);
             }
-        }
     }
-    return result;
+    result
 }
 
 fn find_name_property_mut<'a>(
@@ -149,13 +145,12 @@ fn find_name_property_mut<'a>(
     let mut result = None;
     let props = &mut export.get_normal_export_mut().unwrap().properties;
     for prop in props {
-        if let unreal_asset::properties::Property::NameProperty(name_prop) = prop {
-            if name_prop.name.get_content(|content| content == key) {
+        if let unreal_asset::properties::Property::NameProperty(name_prop) = prop
+            && name_prop.name.get_content(|content| content == key) {
                 result = Some(name_prop);
             }
-        }
     }
-    return result;
+    result
 }
 
 fn find_obj_property_mut<'a>(
@@ -165,13 +160,12 @@ fn find_obj_property_mut<'a>(
     let mut result = None;
     let props = &mut export.get_normal_export_mut().unwrap().properties;
     for prop in props {
-        if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop {
-            if obj_prop.name.get_content(|content| content == name) {
+        if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop
+            && obj_prop.name.get_content(|content| content == name) {
                 result = Some(obj_prop);
             }
-        }
     }
-    return result;
+    result
 }
 
 fn find_import<C: Read + Seek>(
@@ -190,11 +184,11 @@ fn find_import<C: Read + Seek>(
             return Some(PackageIndex::new(-((i + 1) as i32)));
         }
     }
-    return None;
+    None
 }
 
 fn add_actor_to_level<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageIndex) {
-    let level_idx = find_export(asset, &vec![with_name("PersistentLevel")]).unwrap();
+    let level_idx = find_export(asset, &[with_name("PersistentLevel")]).unwrap();
     let export = asset.get_export_mut(level_idx).unwrap();
     if let unreal_asset::Export::LevelExport(level_export) = export {
         level_export.actors.push(idx);
@@ -209,7 +203,7 @@ fn pak_add_brush<W: Write + Seek>(
     level_name: &str,
     asset_name: &str,
 ) -> Option<(String, DVec3)> {
-    let (mesh, origin) = convert_to_mesh(&brush, FACE_VERTEX_SPACING);
+    let (mesh, origin) = convert_to_mesh(brush, FACE_VERTEX_SPACING);
     let cooked = pseudocooker::cook(&mesh, asset_name);
     let uasset_path = format!("Mods/Maps/{}/gen/{}.uasset", level_name, asset_name);
     pak.write_file(&uasset_path, true, &cooked.uasset)
@@ -225,10 +219,8 @@ fn add_static_mesh_import<C: Read + Seek>(
     umap: &mut unreal_asset::Asset<C>,
     path: &str,
 ) -> PackageIndex {
-    let last_slash_idx = path.rfind('/').expect(&format!(
-        "invalid input to add_static_mesh_import: \"{}\"",
-        path
-    ));
+    let last_slash_idx = path.rfind('/').unwrap_or_else(|| panic!("invalid input to add_static_mesh_import: \"{}\"",
+        path));
     // Hardcode to find SM_ExampleBox and use it as the reference import.
     let idx1 = find_import(umap, "Package", "/Game/Mods/Maps/mise/SM_ExampleBox").unwrap();
     let idx2 = find_import(umap, "StaticMesh", "SM_ExampleBox").unwrap();
@@ -249,7 +241,7 @@ fn add_static_mesh_import<C: Read + Seek>(
 }
 
 fn add_player_start<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, origin: DVec3, tag: &str) {
-    let idx = find_export(umap, &vec![with_name("PlayerStart")]).unwrap();
+    let idx = find_export(umap, &[with_name("PlayerStart")]).unwrap();
     let idx = deep_clone_export(umap, idx);
     add_actor_to_level(umap, idx);
 
@@ -267,7 +259,7 @@ fn add_hazard_actor<C: Read + Seek>(
     origin: DVec3,
 ) {
     // Hardcoded to find the BP_Hazard_C and use it as the reference export.
-    let idx = find_export(&umap, &vec![with_name("BP_Hazard_C")]).unwrap();
+    let idx = find_export(umap, &[with_name("BP_Hazard_C")]).unwrap();
     let idx = deep_clone_export(umap, idx);
     add_actor_to_level(umap, idx);
 
@@ -311,10 +303,8 @@ fn set_obj_property(
         .create_before_serialization_dependencies
         .push(idx);
     // this error message should really be in the function.
-    let prop = find_obj_property_mut(export, object_name).expect(&format!(
-        "couldn't find object property \"{}\" in {}",
-        object_name, export_name
-    ));
+    let prop = find_obj_property_mut(export, object_name).unwrap_or_else(|| panic!("couldn't find object property \"{}\" in {}",
+        object_name, export_name));
     prop.value = idx;
 }
 
@@ -333,11 +323,9 @@ fn set_location(export: &mut unreal_asset::Export<PackageIndex>, location: DVec3
 // matter how many clones have been added.
 fn find_original_static_mesh_actor<C: Read + Seek>(umap: &unreal_asset::Asset<C>) -> PackageIndex {
     let idx = find_export(
-        &umap,
-        &vec![
-            with_name("StaticMeshComponent0"),
-            with_import("StaticMesh", "SM_ExampleBox"),
-        ],
+        umap,
+        &[with_name("StaticMeshComponent0"),
+            with_import("StaticMesh", "SM_ExampleBox")],
     )
     .unwrap();
     let export = umap.get_export(idx).unwrap();
@@ -434,7 +422,7 @@ fn main() {
     // rename level export (for swag only; seemingly inconsequential)
     {
         let fname = umap.add_fname("pseudochef_slop");
-        let idx = find_export(&umap, &vec![with_name("mise")]).expect("couldn't find mise");
+        let idx = find_export(&umap, &[with_name("mise")]).expect("couldn't find mise");
         let export = umap.get_export_mut(idx).unwrap();
         export.get_base_export_mut().object_name = fname;
     }
@@ -442,10 +430,10 @@ fn main() {
     // Remove reference actors.
     {
         let idxs = vec![
-            find_export(&umap, &vec![with_name("BP_Hazard_C")]).unwrap(),
-            find_export(&umap, &vec![with_name("BP_SavePoint_C")]).unwrap(),
-            find_export(&umap, &vec![with_name("BP_JumpBubble_C")]).unwrap(),
-            find_export(&umap, &vec![with_name("PlayerStart")]).unwrap(),
+            find_export(&umap, &[with_name("BP_Hazard_C")]).unwrap(),
+            find_export(&umap, &[with_name("BP_SavePoint_C")]).unwrap(),
+            find_export(&umap, &[with_name("BP_JumpBubble_C")]).unwrap(),
+            find_export(&umap, &[with_name("PlayerStart")]).unwrap(),
             find_original_static_mesh_actor(&umap),
         ];
 
@@ -471,7 +459,7 @@ fn main() {
     for (name, bytes) in MISE_FILES {
         let path = format!("Mods/Maps/mise/{}", name);
         pak.write_file(&path, true, bytes)
-            .expect(&format!("failed to write {} to pak", name));
+            .unwrap_or_else(|_| panic!("failed to write {} to pak", name));
     }
 
     let mut writer = pak.write_index().expect("failed to write pak file");
