@@ -3,7 +3,6 @@ use shalrath::parser::repr::parse_map;
 use std::collections::HashMap;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
-use std::sync::OnceLock;
 use std::time::Instant;
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
@@ -53,20 +52,6 @@ const MISE_UEXP: &[u8] = include_bytes!("mise/mise.uexp");
 // see `brush_to_mesh::convert_to_mesh`. Smaller values give smoother
 // per-vertex lighting at the cost of more geometry.
 const FACE_VERTEX_SPACING: f64 = 64.0;
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct Error {
-    msg: String,
-}
-
-#[allow(dead_code)]
-fn slice_to_string<T: std::fmt::Display>(v: &[T]) -> String {
-    v.iter()
-        .map(|i| i.to_string())
-        .collect::<Vec<String>>()
-        .join(", ")
-}
 
 type UnrealExportConstraint<'a, C> = Box<
     dyn Fn(&unreal_asset::Asset<C>, &unreal_asset::exports::NormalExport<PackageIndex>) -> bool
@@ -345,24 +330,26 @@ fn set_location(export: &mut unreal_asset::Export<PackageIndex>, location: DVec3
     prop.value.z.0 = location.z;
 }
 
-fn lazy_find_original_static_mesh_actor<C: Read + Seek>(
+// Finds the reference StaticMeshActor by its component's name and mesh.
+// Clones made by `add_static_mesh_actor` never match: `deep_clone_export`
+// renames the cloned component and `set_obj_property` repoints its
+// StaticMesh at the generated mesh's import, so this stays unambiguous no
+// matter how many clones have been added.
+fn find_original_static_mesh_actor<C: Read + Seek>(
     umap: &unreal_asset::Asset<C>,
 ) -> PackageIndex {
-    static ORIGINAL_STATIC_MESH_ACTOR: OnceLock<PackageIndex> = OnceLock::new();
-    *ORIGINAL_STATIC_MESH_ACTOR.get_or_init(|| {
-        let idx = find_export(
-            &umap,
-            &vec![
-                with_name("StaticMeshComponent0"),
-                with_import("StaticMesh", "SM_ExampleBox"),
-            ],
-        )
-        .unwrap();
-        let export = umap.get_export(idx).unwrap();
+    let idx = find_export(
+        &umap,
+        &vec![
+            with_name("StaticMeshComponent0"),
+            with_import("StaticMesh", "SM_ExampleBox"),
+        ],
+    )
+    .unwrap();
+    let export = umap.get_export(idx).unwrap();
 
-        // Return the parent (a StaticMeshActor).
-        export.get_base_export().outer_index
-    })
+    // Return the parent (a StaticMeshActor).
+    export.get_base_export().outer_index
 }
 
 fn add_static_mesh_actor<C: Read + Seek>(
@@ -370,7 +357,7 @@ fn add_static_mesh_actor<C: Read + Seek>(
     import_idx: PackageIndex,
     origin: DVec3,
 ) {
-    let idx2 = lazy_find_original_static_mesh_actor(umap);
+    let idx2 = find_original_static_mesh_actor(umap);
     let idx3 = deep_clone_export(umap, idx2);
     add_actor_to_level(umap, idx3);
 
@@ -465,7 +452,7 @@ fn main() {
             find_export(&umap, &vec![with_name("BP_SavePoint_C")]).unwrap(),
             find_export(&umap, &vec![with_name("BP_JumpBubble_C")]).unwrap(),
             find_export(&umap, &vec![with_name("PlayerStart")]).unwrap(),
-            lazy_find_original_static_mesh_actor(&umap),
+            find_original_static_mesh_actor(&umap),
         ];
 
         for idx in idxs {
