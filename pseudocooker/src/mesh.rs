@@ -1,28 +1,16 @@
-//! Raw-mesh-data -> UE5.1 render-mesh builder: turns plain vertex/UV/normal/
-//! face data into the flat, per-face-corner (hard-edge) vertex/index/section
-//! data that an FStaticMeshLODResources expects (mirrors what SM_Box's real
-//! cooked data looks like: e.g. a 12-triangle box has 24 vertices, no
-//! cross-face sharing).
-//!
-//! This is a direct port of `cook_mesh.py`'s `build_render_mesh`, with the
-//! OBJ-text-parsing front end (`load_obj_full`) removed: callers hand in
-//! positions/uvs/normals/faces directly instead of an OBJ path.
-//!
-//! Simplifications vs. a real UE import (clearly documented, none of them
-//! affect collision correctness -- only rendering fidelity):
-//!   - Per-face-corner vertices are never welded across faces (matches the
-//!     "flat shaded, hard edges" case observed in both real corpus assets;
-//!     smoothing groups / shared-vertex welding are not implemented).
-//!   - Tangent packing uses a standard int8 quantization
-//!     (round(component*127), clamped to [-127,127]) rather than reproducing
-//!     UE's exact FPackedNormal rounding bit-for-bit -- this only affects
-//!     normal-map lighting precision, not geometry, indices, or collision.
-//!   - Bitangent handedness (TangentZ.W) is always +127 (a fixed convention);
-//!     wrong handedness would only flip normal-map Y, not geometry.
-//!   - If no normals are supplied, flat per-face normals are computed from
-//!     the triangle winding. If no UVs are supplied, (0,0) is used everywhere.
-//!   - Positions are passed through as-is: input is expected to already be
-//!     in UE's axis convention and centimeter units.
+//! Produces serialized render mesh data as expected by FStaticMeshLODResources.
+//! 
+//! Notes:
+//!   - Per-face-corner vertices are never welded across faces.
+//!   - Tangent packing uses a standard int8 quantization (round(component*127), clamped to
+//!     [-127,127]) rather than reproducing UE's exact FPackedNormal rounding bit-for-bit -- this
+//!     only affects normal-map lighting precision, not geometry, indices, or collision.
+//!   - Bitangent handedness (TangentZ.W) is always +127 (a fixed convention); wrong handedness
+//!     would only flip normal-map Y, not geometry.
+//!   - If no normals are supplied, flat per-face normals are computed from the triangle winding. If
+//!     no UVs are supplied, (0,0) is used everywhere.
+//!   - Positions are passed through as-is: input is expected to already be in UE's axis convention
+//!     and centimeter units.
 
 use std::collections::HashMap;
 
@@ -99,8 +87,7 @@ pub struct Bounds {
     pub sphere_radius: f64,
 }
 
-/// Returns the flat, per-face-corner render-mesh data that
-/// `FStaticMeshLODResources` expects:
+/// Returns the flat, per-face-corner render-mesh data that FStaticMeshLODResources expects:
 ///   positions: one per render vertex
 ///   tangents:  packed int8 4-tuples, ready for the vertex buffer
 ///   uvs:       one UV channel, one per render vertex
@@ -181,11 +168,8 @@ pub fn build_render_mesh(mesh: &MeshInput) -> RenderMesh {
         }
     }
 
-    // When no normals were supplied at all, compute SMOOTH per-vertex
-    // normals (area-weighted average of adjacent face normals, keyed by
-    // position index) rather than flat per-face normals -- see
-    // cook_mesh.py's long comment on this for why (arbitrary real-world
-    // input may share position indices across faces).
+    // When no normals were supplied at all, compute SMOOTH per-vertex normals (area-weighted
+    // average of adjacent face normals, keyed by position index) rather than flat per-face normals.
     let has_any_vn = faces.iter().any(|f| f.corners.iter().any(|c| c.normal.is_some()));
     let smooth_normals: Option<Vec<Vec3>> = if !has_any_vn {
         let mut accum = vec![[0.0f64; 3]; positions_in.len()];
@@ -222,10 +206,8 @@ pub fn build_render_mesh(mesh: &MeshInput) -> RenderMesh {
     for (&material_index, tris) in tris_by_material.iter() {
         let first_index = out_indices.len();
         let min_vert = out_positions.len();
-        // Wedge dedup keyed by (posIdx, uvIdx, normalIdx): reuses a render
-        // vertex whenever a face corner repeats the exact same attribute
-        // combo -- see cook_mesh.py's long comment on this for the full
-        // rationale (this is what every OBJ importer does).
+        // Wedge dedup keyed by (posIdx, uvIdx, normalIdx): reuses a render vertex whenever a face
+        // corner repeats the exact same attribute combo. 
         let mut wedge_cache: HashMap<Corner, u32> = HashMap::new();
 
         for (c0, c1, c2) in tris {
@@ -289,7 +271,6 @@ pub fn build_render_mesh(mesh: &MeshInput) -> RenderMesh {
         });
     }
 
-    // Bounds
     let (lo, hi) = if out_positions.is_empty() {
         ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
     } else {

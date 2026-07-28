@@ -2,7 +2,7 @@
 name = "pseudocooker"
 version = "0.1.0"
 edition = "2021"
-description = "Pure-Rust cooker that turns raw vertex/face/uv mesh data into a UE5.1-compliant cooked StaticMesh package (.uasset/.uexp/.ubulk), with no dependency on Unreal Engine itself."
+description = "UE5.1 static mesh cooker"
 
 [dependencies]
 rand = "0.8"

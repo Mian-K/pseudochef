@@ -1,14 +1,7 @@
-//! BodySetup export writer -- inverse of section 9.1 / 9.2 / 9.3.
+//! BodySetup export writer
 //!
-//! Tagged properties: DefaultInstance (BodyInstance: ObjectType, CollisionProfileName)
-//!                     + CollisionTraceFlag = CTF_UseComplexAsSimple
-//! Native tail:        BodySetupGuid, bCooked, bHasCookedCollisionData,
-//!                      CookedFormatData["PhysXPC"] (via physxpc::encode()).
-//!
-//! AggGeom (simple collision shapes) is intentionally left empty -- both real
-//! corpus assets (SM_Box, CubeGridToolOutput) use CTF_UseComplexAsSimple with
-//! an empty AggGeom, so the render mesh itself (via the PhysXPC complex-
-//! collision blob) IS the collision.
+//! Notes:
+//!   - Simple collision (AggGeom) omitted, complex collision assumed (CTF_UseComplexAsSimple)
 
 use crate::core::{
     write_byte_enum_property, write_fname_ref, write_name_property, write_none_terminator, Name, NameTable, Writer,
@@ -18,17 +11,15 @@ use crate::physxpc::{self, Vec3};
 const BULKDATA_SINGLE_USE: u32 = 1 << 3;
 const BULKDATA_FORCE_INLINE_PAYLOAD: u32 = 1 << 6;
 
-/// A patch to apply once the containing export's absolute SerialOffset in
-/// the .uexp is known: (byte position of the placeholder Offset field,
-/// byte position where the payload itself starts), both relative to the
-/// start of this export's body.
+/// A patch to apply once the containing export's absolute SerialOffset in the .uexp is known: (byte
+/// position of the placeholder Offset field, byte position where the payload itself starts), both
+/// relative to the start of this export's body.
 pub type Patch = (usize, usize);
 
-/// FBulkData / FBulkMetaResource, common (non-64-bit) inline form (section
-/// 8): Flags(4) + ElementCount(4) + SizeOnDisk(4) + Offset(8), then
-/// `payload` bytes immediately follow. Offset is informational only for
-/// inline payloads (not used on load) but we still compute a real value via
-/// the patch mechanism, matching what a real cook writes.
+/// FBulkData / FBulkMetaResource, common (non-64-bit) inline form : Flags(4) + ElementCount(4) +
+/// SizeOnDisk(4) + Offset(8), then `payload` bytes immediately follow. Offset is informational only
+/// for inline payloads (not used on load) but we still compute a real value via the patch
+/// mechanism, matching what a real cook writes.
 pub fn write_bulk_data_inline(w: &mut Writer, flags: u32, payload: &[u8], patches: &mut Vec<Patch>) {
     w.u32(flags);
     w.i32(payload.len() as i32);
@@ -75,10 +66,10 @@ pub fn write_body_setup(
     write_byte_enum_property(&mut w, table, "CollisionTraceFlag", "ECollisionTraceFlag", "CTF_UseComplexAsSimple");
     write_none_terminator(&mut w, table);
 
-    // --- hidden lazy-object-guid presence bool (section 7) ---
+    // --- hidden lazy-object-guid presence ---
     w.ubool(false);
 
-    // --- native tail (section 9.1) ---
+    // --- native tail ---
     w.fguid(body_setup_guid_hex32);
     w.ubool(true); // bCooked
     w.ubool(true); // bHasCookedCollisionData

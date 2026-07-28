@@ -1,23 +1,12 @@
-//! Read and write UE5.1 cooked "PhysXPC" complex-collision blobs
-//! (`UBodySetup.CookedFormatData["PhysXPC"]`) with NO Unreal Engine code.
+//! Complex collision
 //!
-//! Direct port of the `encode()` side of `physxpc_tool.py` (decode and the
-//! CLI/OBJ-loading bits are out of scope for this crate -- see that file's
-//! module docstring for the full reverse-engineering trail against
-//! `/workspace/unreal`).
+//! Based on UE5.1 source code for collision cooking:
+//!   - FChaosDerivedDataCooker
+//!   - Chaos::FCookHelper
 //!
-//! Despite the legacy "PhysXPC" name, this blob is produced ENTIRELY by
-//! Chaos code (`FChaosDerivedDataCooker` / `Chaos::FCookHelper`) -- UE5.1
-//! doesn't even ship PhysX SDK source anymore.
-//!
-//! BVH CAVEAT: UE builds `FTrimeshBVH` via a generic templated
-//! spatial-partitioning structure (`TAABBTree`) with its own splitting
-//! heuristic; matching that bit-for-bit is out of scope. `build_bvh` below
-//! constructs its own valid, simple recursive median-split binary tree using
-//! the SAME on-disk FNode/FChildData format and the same 22-faces-per-leaf
-//! cap Chaos itself uses. For meshes with <= 22 triangles (the common case
-//! for simple test/prop meshes) this IS byte-identical to UE's own cook,
-//! since there's no split ambiguity in the single-leaf case.
+//! Notes:
+//!   - The BVH construction logic here does not match UE5.1 exactly, but should be valid by its
+//!     standards and identical for small meshes.
 
 use crate::core::Writer;
 
@@ -28,10 +17,9 @@ const OBJECT_TYPE_TRIANGLE_MESH: u8 = 11; // Chaos::ImplicitObjectType::Triangle
 const UE_SMALL_NUMBER: f64 = 1.0e-8; // Core/Public/Math/UnrealMathUtility.h:130
 const MAX_CHILDREN_IN_LEAF: usize = 22; // TriangleMeshImplicitObject.cpp:1639
 
-// Default (never-explicitly-set) FAABBVectorized() sentinel for an unused
-// BVH child slot -- AABBVectorized.h:19-23 uses GlobalVectorConstants::
-// BigNumber = UE_BIG_NUMBER (UnrealMathUtility.h:132) = literal 3.4e+38f,
-// NOT FLT_MAX.
+// Default (never-explicitly-set) FAABBVectorized() sentinel for an unused BVH child slot.
+// AABBVectorized.h:19-23 uses GlobalVectorConstants:: BigNumber = UE_BIG_NUMBER
+// (UnrealMathUtility.h:132) = literal 3.4e+38f, NOT FLT_MAX.
 const UE_BIG_NUMBER: f32 = 3.4e+38_f32;
 
 fn empty_aabb() -> Aabb {
@@ -186,10 +174,7 @@ pub struct BvhChild {
 
 pub type BvhNode = [BvhChild; 2];
 
-/// Builds a valid binary FTrimeshBVH over faces [0, num_triangles). See the
-/// module-level "BVH CAVEAT" docs: this is NOT a reproduction of Chaos's
-/// TAABBTree splitting heuristic, just a simple valid one (same on-disk
-/// format, same leaf-size cap).
+/// Builds a valid binary FTrimeshBVH over faces [0, num_triangles).
 ///
 /// Returns (nodes, face_bounds, face_order):
 ///   face_order: permutation grouping faces contiguously by leaf --
@@ -291,8 +276,7 @@ pub fn build_bvh(
 }
 
 /// `positions`: render-mesh PositionVertexBuffer.
-/// `triangles`: UE winding as authored (exactly what you'd read out of a
-///              static mesh's IndexBuffer, grouped into triples).
+/// `triangles`: UE winding as authored.
 /// `material_per_triangle`: optional, len == triangles.len().
 ///
 /// Returns the raw bytes of a `CookedFormatData["PhysXPC"]` payload.

@@ -1,10 +1,4 @@
-//! Core low-level infrastructure shared by the cooked-UE5.1-package encoder:
-//! byte writer, FName table, FPropertyTag (tagged-property) writer.
-//!
-//! Direct port of `cook_core.py`, byte-for-byte. See that file (and
-//! `/workspace/README.txt` / the UE5.1 source it was reverse-engineered
-//! against) for the authoritative format citations; this module just
-//! implements the same write-side rules in Rust.
+//! Cook infrastructure: byte writer, FName table, FPropertyTag writer.
 
 pub struct Writer {
     buf: Vec<u8>,
@@ -55,7 +49,7 @@ impl Writer {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
-    /// section 0: bool is ALWAYS 4 bytes on disk (legacy UBOOL)
+    /// bool is ALWAYS 4 bytes on disk (legacy UBOOL)
     pub fn ubool(&mut self, v: bool) {
         self.i32(if v { 1 } else { 0 });
     }
@@ -96,9 +90,7 @@ impl Default for Writer {
     }
 }
 
-/// FName interning table -- names are appended in first-use order, exactly
-/// matching what a cooker would do (section 2: "opaque ordered string
-/// table", one entry per unique FName string).
+/// FName interning table -- names are appended in first-use order, matching UE.
 pub struct NameTable {
     pub names: Vec<String>,
     index: std::collections::HashMap<String, i32>,
@@ -126,10 +118,6 @@ impl Default for NameTable {
     }
 }
 
-/// A name reference: base string + instance number. Mirrors Python's
-/// `_split()` helper, which accepts either a plain string (number=0) or an
-/// explicit (base, number) tuple -- here that's just `"Foo".into()` vs.
-/// `("Foo", 1).into()`.
 #[derive(Clone)]
 pub struct Name {
     pub base: String,
@@ -168,15 +156,15 @@ impl From<(String, i32)> for Name {
 
 pub const NONE_NAME: &str = "None";
 
-/// FName REFERENCE (section 0): int32 NameIndex + int32 Number, always 8 bytes.
+/// FName REFERENCE: int32 NameIndex + int32 Number, always 8 bytes.
 pub fn write_fname_ref(w: &mut Writer, table: &mut NameTable, name: impl Into<Name>) {
     let name = name.into();
     w.i32(table.intern(&name.base));
     w.i32(name.number);
 }
 
-/// FName TABLE ENTRY (section 2): FString + 2x uint16 hash (unused on load,
-/// but must be present; we write 0 since nothing checks these on modern load).
+/// FName TABLE ENTRY: FString + 2x uint16 hash (unused on load, but must be present; we write 0
+/// since nothing checks these on modern load).
 pub fn write_name_table_entry(w: &mut Writer, name: &str) {
     w.fstring(name);
     w.u16(0);
@@ -187,9 +175,9 @@ pub fn write_none_terminator(w: &mut Writer, table: &mut NameTable) {
     write_fname_ref(w, table, NONE_NAME);
 }
 
-// ---------------------------------------------------------------------------
-// FPropertyTag (tagged property) writer -- section 6
-// ---------------------------------------------------------------------------
+// -------------------
+// FPropertyTag writer
+// -------------------
 
 pub const ZERO_GUID: &str = "00000000000000000000000000000000";
 
@@ -321,7 +309,7 @@ pub fn write_double_property(w: &mut Writer, table: &mut NameTable, name: impl I
     write_value_property(w, table, name, "DoubleProperty", &value_w.getvalue(), TagExtra::default());
 }
 
-/// StructProperty, StructName=Vector -- FVector IS a native/`immutable`
+/// StructProperty, StructName=Vector -- FVector is a native/`immutable`
 /// USTRUCT (NoExportTypes.h:510 `USTRUCT(immutable, ...) struct FVector`),
 /// so unlike FBoxSphereBounds this one genuinely is flat/intrinsic when tagged.
 pub fn write_vector_property(w: &mut Writer, table: &mut NameTable, name: impl Into<Name>, x: f64, y: f64, z: f64) {
@@ -359,8 +347,11 @@ pub fn write_box_sphere_bounds_property(
     write_struct_property(w, table, name, "BoxSphereBounds", &inner.getvalue());
 }
 
-// --- intrinsic struct value encoders (write just the VALUE bytes; caller
-//     wraps with write_struct_property) ---
+// -------------------------------
+// Intrinsic struct value encoders
+// -------------------------------
+//
+// Note: these write just the value bytes; caller wraps with write_struct_property
 
 pub fn encode_vector(x: f64, y: f64, z: f64) -> Vec<u8> {
     let mut w = Writer::new();

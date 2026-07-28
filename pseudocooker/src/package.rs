@@ -1,25 +1,21 @@
-//! Package assembly -- builds the full .uasset (header+name+import+export
-//! tables) and .uexp (concatenated export bodies + trailing tag) for a
-//! cooked UE5.1 StaticMesh package, from the three export bodies produced by
-//! `bodysetup` / `navcollision` / `staticmesh`.
+//! Package assembly
 //!
-//! LOAD-PATH NOTES (verified by reading LinkerLoad.cpp / SavePackage2.cpp /
-//! AsyncLoading.cpp directly, not guessed):
-//!   - DependsOffset = 0: FLinkerLoad::SerializeDependsMap treats this as
-//!     "package saved badly" and returns immediately (LinkerLoad.cpp:2223-2227).
-//!     No depends section is written at all.
-//!   - PreloadDependencyCount / the PreloadDependency array is EMPHATICALLY
-//!     NOT optional, despite FLinkerLoad::SerializePreloadDependencies
-//!     happily skipping it when Count<1: the Event-Driven Loader (EDL) uses
-//!     exactly this data to sequence object creation, and a real
-//!     packaged/cooked game loads content through the EDL, not FLinkerLoad.
-//!     See the long comment on `exports` below for exactly which arcs we
-//!     emit and why (mirrors SavePackage2.cpp:1370-1586).
-//!   - AssetRegistryDataOffset: for a PKG_Cooked package, the Asset
-//!     Registry's FPackageReader::ReadAssetRegistryDataFromCookedPackage
-//!     derives asset info entirely from the already-parsed Name/Import/
-//!     Export maps -- it does NOT seek to or read AssetRegistryDataOffset
-//!     at all. Its value is therefore irrelevant; we set it to
+//! Writes:
+//!   - header
+//!   - name, import, and export tables
+//!
+//! Notes from analyzing UE5.1 asset loading codepath:
+//!   - DependsOffset = 0: FLinkerLoad::SerializeDependsMap treats this as "package saved badly" and
+//!     returns immediately (LinkerLoad.cpp:2223-2227). No depends section is written at all.
+//!   - PreloadDependencyCount / the PreloadDependency array is NOT optional, despite
+//!     FLinkerLoad::SerializePreloadDependencies happily skipping it when Count<1: the Event-Driven
+//!     Loader (EDL) uses exactly this data to sequence object creation, and a real packaged/cooked
+//!     game loads content through the EDL, not FLinkerLoad. See the long comment on `exports` below
+//!     for exactly which arcs we emit and why (mirrors SavePackage2.cpp:1370-1586).
+//!   - AssetRegistryDataOffset: for a PKG_Cooked package, the Asset Registry's
+//!     FPackageReader::ReadAssetRegistryDataFromCookedPackage derives asset info entirely from the
+//!     already-parsed Name/Import/ Export maps -- it does NOT seek to or read
+//!     AssetRegistryDataOffset at all. Its value is therefore irrelevant; we set it to
 //!     TotalHeaderSize (an empty, harmless "section").
 
 use crate::bodysetup;
@@ -32,11 +28,7 @@ const PACKAGE_FILE_TAG: u32 = 0x9E2A83C1;
 const PKG_FILTER_EDITOR_ONLY: u32 = 0x80000000;
 const PKG_COOKED: u32 = 0x00000200;
 
-/// Optional, explicit overrides for the package's random GUIDs. Leaving
-/// these `None` (the default) generates fresh random GUIDs exactly like the
-/// Python original's `uuid.uuid4()` calls; setting them lets callers (e.g.
-/// this crate's own byte-for-byte validation harness) produce fully
-/// deterministic, reproducible output.
+/// Optional GUID override (randomized by default)
 #[derive(Default, Clone)]
 pub struct CookOptions {
     pub body_setup_guid: Option<String>,
@@ -48,9 +40,7 @@ fn new_guid_hex32() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
-    // Set RFC4122 version 4 / variant bits, matching uuid::uuid4() semantics
-    // (functionally inert for our purposes -- any 32 hex chars work as a
-    // Guid on disk -- but keeps this a faithful analogue of the original).
+    // Set RFC4122 version 4 / variant bits. Possibly unnecessary.
     bytes[6] = (bytes[6] & 0x0F) | 0x40;
     bytes[8] = (bytes[8] & 0x3F) | 0x80;
     let mut s = String::with_capacity(32);
@@ -85,9 +75,11 @@ struct ExportEntry {
     b_is_asset: bool,
     body: Vec<u8>,
     patches: Vec<(usize, usize)>,
-    /// (SerializationBeforeSerialization, CreateBeforeSerialization,
-    ///  SerializationBeforeCreate, CreateBeforeCreate) -- see the long
-    /// comment on `exports` in cook_package for what these buckets mean.
+    /// preload_deps:
+    ///   1. SerializationBeforeSerialization
+    ///   2. CreateBeforeSerialization
+    ///   3. SerializationBeforeCreate
+    ///   4. CreateBeforeCreate
     preload_deps: (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i32>),
 }
 
@@ -106,17 +98,18 @@ fn material_per_triangle(mesh: &RenderMesh) -> Vec<u16> {
     out
 }
 
-/// `package_short_name`: e.g. "SM_Teapot" -- becomes /Game/<name> and the
-/// top-level StaticMesh export's object name.
-/// `mesh`: as returned by `mesh::build_render_mesh`.
+/// Arguments:
+/// `package_short_name`: e.g. pass in "SM_Box" ->
+///     top-level StaticMesh export name becomes "/Game/SM_Box"
+/// `mesh`: as returned by `mesh::build_render_mesh`
 ///
 /// Returns (uasset_bytes, uexp_bytes).
 pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookOptions) -> (Vec<u8>, Vec<u8>) {
     let mut table = NameTable::new();
 
-    // --- export bodies (this interns all "content" FNames first, matching
-    //     the real name-table ordering: property/type names, then
-    //     import/export/package names) ---
+    // --- export bodies ---
+    // This interns all "content" FNames first, matching the real name-table ordering:
+    // property/type names, then import/export/package names
     let body_setup_guid = options.body_setup_guid.clone().unwrap_or_else(new_guid_hex32);
     let lighting_guid = options.lighting_guid.clone().unwrap_or_else(new_guid_hex32);
 
@@ -130,41 +123,29 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
     let nav_collision_bytes = navcollision::write_nav_collision(&mut table);
     let static_mesh_bytes = staticmesh::write_static_mesh(&mut table, mesh, 0, 1, &lighting_guid);
 
-    // --- import table (fixed shape -- establishes each export's UClass) ---
-    // Mirrors SM_Box's real 8-entry import table exactly.
+    // --- import table ---
+    // Hardcoded based on a sample cooked static mesh asset generated by UE5.1.
     let imports: Vec<ImportEntry> = vec![
-        ImportEntry { class_package: "/Script/Engine", class_name: "BodySetup", outer_index: -6, object_name: ("Default__BodySetup", 0) }, // [0]
-        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -6, object_name: ("BodySetup", 0) }, // [1]
-        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -6, object_name: ("StaticMesh", 0) }, // [2]
-        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -7, object_name: ("NavCollision", 0) }, // [3]
-        ImportEntry { class_package: "/Script/NavigationSystem", class_name: "NavCollision", outer_index: -7, object_name: ("Default__NavCollision", 0) }, // [4]
-        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Package", outer_index: 0, object_name: ("/Script/Engine", 0) }, // [5]
-        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Package", outer_index: 0, object_name: ("/Script/NavigationSystem", 0) }, // [6]
-        ImportEntry { class_package: "/Script/Engine", class_name: "StaticMesh", outer_index: -6, object_name: ("Default__StaticMesh", 0) }, // [7]
+        ImportEntry { class_package: "/Script/Engine", class_name: "BodySetup", outer_index: -6, object_name: ("Default__BodySetup", 0) },
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -6, object_name: ("BodySetup", 0) },
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -6, object_name: ("StaticMesh", 0) },
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Class", outer_index: -7, object_name: ("NavCollision", 0) },
+        ImportEntry { class_package: "/Script/NavigationSystem", class_name: "NavCollision", outer_index: -7, object_name: ("Default__NavCollision", 0) },
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Package", outer_index: 0, object_name: ("/Script/Engine", 0) },
+        ImportEntry { class_package: "/Script/CoreUObject", class_name: "Package", outer_index: 0, object_name: ("/Script/NavigationSystem", 0) },
+        ImportEntry { class_package: "/Script/Engine", class_name: "StaticMesh", outer_index: -6, object_name: ("Default__StaticMesh", 0) },
     ];
 
     // --- export table ---
-    // FPackageIndex encoding: N>0 -> export index N-1 (this file's own export
-    // table); N<0 -> import index -N-1.
-    //
-    // `preload_deps` mirrors SavePackage2.cpp:1370-1586's four dependency
-    // buckets (SerializationBeforeSerialization / CreateBeforeSerialization /
-    // SerializationBeforeCreate / CreateBeforeCreate), each a list of
-    // FPackageIndex ints, IN THAT ORDER -- this is what the Event-Driven
-    // Loader actually uses to sequence object creation across a package.
-    // Every export needs SerializationBeforeCreate={ClassIndex,TemplateIndex}
-    // (its class and archetype must exist before it can be constructed) and
-    // CreateBeforeCreate={OuterIndex} if it has a non-null Outer.
-    // StaticMesh additionally declares BodySetup+NavCollision as
-    // SerializationBeforeSerialization deps (its own Serialize() reads their
-    // FPackageIndex-typed fields directly).
-    //
-    // CROSS-CHECKED against the real corpus SM_Box.uasset's actual export
-    // table bytes: StaticMesh's BodySetup/NavCollision references land in
-    // bucket 2 (CreateBeforeSerialization -- picked up as NATIVE object
-    // dependencies, NOT bucket 1/GetPreloadDependencies, which is empty for
-    // all three real exports). Real observed dep counts: BodySetup=(0,0,2,1),
-    // NavCollision=(0,0,2,1), StaticMesh=(0,2,2,0).
+    // `preload_deps` mirrors SavePackage2.cpp:1370-1586's four dependency buckets
+    // (SerializationBeforeSerialization / CreateBeforeSerialization / SerializationBeforeCreate /
+    // CreateBeforeCreate), each a list of FPackageIndex ints, IN THAT ORDER -- this is what the
+    // Event-Driven Loader actually uses to sequence object creation across a package. Every export
+    // needs SerializationBeforeCreate={ClassIndex,TemplateIndex} (its class and archetype must
+    // exist before it can be constructed) and CreateBeforeCreate={OuterIndex} if it has a non-null
+    // Outer. StaticMesh additionally declares BodySetup+NavCollision as
+    // SerializationBeforeSerialization deps (its own Serialize() reads their FPackageIndex-typed
+    // fields directly).
     let mut exports = vec![
         ExportEntry {
             class_index: -2,
@@ -204,12 +185,7 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
         },
     ];
 
-    // ------------------------------------------------------------------
-    // header (fixed-width fields; section 1) -- compute NameOffset first
-    // by writing a throwaway header of known width, since every field up
-    // to NameOffset is constant-size once PKG_FilterEditorOnly is set
-    // (LocalizationId / PersistentGuid are both absent).
-    // ------------------------------------------------------------------
+    // --- header ---
     let mut header = Writer::new();
     header.u32(PACKAGE_FILE_TAG);
     header.i32(-8); // LegacyFileVersion
@@ -248,7 +224,7 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
     header.i32(0); // ThumbnailTableOffset
     let package_guid = options.package_guid.clone().unwrap_or_else(new_guid_hex32);
     header.fguid(&package_guid); // deprecated package Guid, still written
-    // PersistentGuid ABSENT (PKG_FilterEditorOnly set)
+    // PersistentGuid omitted (PKG_FilterEditorOnly set)
     header.i32(1); // GenerationCount
     let gen_export_count_pos = header.tell();
     header.i32(0); // Generations[0].ExportCount (patched)
@@ -258,7 +234,7 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
     write_engine_version_empty(&mut header); // CompatibleWithEngineVersion
     header.u32(0); // CompressionFlags
     header.i32(0); // CompressedChunkCount
-    header.u32(0); // PackageSource (not meaningful to reproduce -- section 1)
+    header.u32(0); // PackageSource (not meaningful to reproduce)
     header.i32(0); // AdditionalPackagesToCookCount
     let asset_registry_data_offset_pos = header.tell();
     header.i32(0); // AssetRegistryDataOffset (patched -- see docs, value is inert)
@@ -276,32 +252,30 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
 
     let name_offset = header.tell();
 
-    // --- import table (built FIRST so it interns its own names into `table`
-    //     -- the name table below must reflect ALL names, including these
-    //     and the export ObjectNames interned just after). Building the
-    //     name table before this step is the classic off-by-N trap here:
-    //     NameCount would then be patched to the FINAL (larger) table.names
-    //     length while the actual name-table bytes only covered the earlier
-    //     subset, desyncing every NameIndex used anywhere after that
-    //     point. ---
+    // --- import table ---
+    // built FIRST so it interns its own names into `table` -- the name table below must reflect ALL
+    // names, including these and the export ObjectNames interned just after). Building the name
+    // table before this step is the classic off-by-N trap here: NameCount would then be patched to
+    // the FINAL (larger) table.names length while the actual name-table bytes only covered the
+    // earlier subset, desyncing every NameIndex used anywhere after that point.
     let mut import_table_w = Writer::new();
     for imp_entry in &imports {
         write_fname_ref(&mut import_table_w, &mut table, imp_entry.class_package);
         write_fname_ref(&mut import_table_w, &mut table, imp_entry.class_name);
         import_table_w.i32(imp_entry.outer_index);
         write_fname_ref(&mut import_table_w, &mut table, Name::from((imp_entry.object_name.0, imp_entry.object_name.1)));
-        // bImportOptional: real observed value in the corpus SM_Box.uasset
-        // is False for all 8 imports.
+        // In a sample cooked static mesh asset generated by UE5.1, bImportOptional was observed to
+        // be false for all imports.
         import_table_w.ubool(false); // bImportOptional
     }
 
-    // Pre-intern export ObjectNames too (export_table_w itself is built
-    // further below, once total_header_size is known for SerialOffset).
+    // Pre-intern export ObjectNames too (export_table_w itself is built further below, once
+    // total_header_size is known for SerialOffset).
     for e in &exports {
         table.intern(&e.object_name.0);
     }
 
-    // --- name table (table.names is now complete) ---
+    // --- name table ---
     let mut name_table_w = Writer::new();
     for name in &table.names {
         write_name_table_entry(&mut name_table_w, name);
@@ -310,18 +284,15 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
     let import_offset = name_offset + name_table_w.tell();
     let export_offset = import_offset + import_table_w.tell();
 
-    // --- export table (SerialOffset/SerialSize need final TotalHeaderSize,
-    //     so we compute those in a second pass just below) ---
+    // --- export table ---
     let mut export_table_w = Writer::new();
 
     let total_export_body_size: usize = exports.iter().map(|e| e.body.len()).sum();
 
-    // --- PreloadDependency array (section-1-style trailing header section;
-    //     see the long comment on `exports` above for why this exists).
-    //     Written in SavePackage2.cpp's bucket order: SerializationBefore-
-    //     Serialization, CreateBeforeSerialization, SerializationBeforeCreate,
-    //     CreateBeforeCreate. Each export's FirstExportDependency is the
-    //     shared array's running start index at the time we reach it. ---
+    // --- PreloadDependency array ---
+    // SerializationBeforeSerialization, CreateBeforeSerialization, SerializationBeforeCreate,
+    // CreateBeforeCreate. See SavePackage2.cpp for more info.
+    // FirstExportDependency is the shared array's running start index at the time we reach it.
     let mut preload_dependency_array: Vec<i32> = Vec::new();
     let mut first_export_dependency: Vec<i32> = Vec::with_capacity(exports.len());
     let mut dep_counts: Vec<(i32, i32, i32, i32)> = Vec::with_capacity(exports.len());
@@ -374,8 +345,8 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
         export_table_w.u32(0); // PackageFlags
         export_table_w.ubool(true); // bNotAlwaysLoadedForEditorGame
         export_table_w.ubool(e.b_is_asset);
-        // bGeneratePublicHash: real observed VALUE in the corpus
-        // SM_Box.uasset is False for all three exports.
+        // In a sample cooked static mesh asset generated by UE5.1, bGeneratePublicHash was observed
+        // to be false for all exports.
         export_table_w.ubool(false); // bGeneratePublicHash
         export_table_w.i32(first_export_dependency[i]);
         let (a, b, c, d) = dep_counts[i];
@@ -385,8 +356,8 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
         export_table_w.i32(d);
     }
 
-    // each export table entry is exactly 96 bytes; verify our field list
-    // actually matches that, since total_header_size above assumed it.
+    // each export table entry is exactly 96 bytes; verify our field list actually matches that,
+    // since total_header_size above assumed it.
     assert_eq!(export_table_w.tell(), export_table_size);
 
     let mut preload_dependency_w = Writer::new();
@@ -428,12 +399,8 @@ pub fn cook_package(package_short_name: &str, mesh: &RenderMesh, options: &CookO
     uasset.extend_from_slice(&preload_dependency_w.getvalue());
     assert_eq!(uasset.len(), total_header_size);
 
-    // ------------------------------------------------------------------
-    // .uexp: concatenated export bodies, then patch each export's inline
-    // bulk-data Offset fields (section 8 case (a): Offset =
-    // TotalHeaderSize + uexp-relative payload start), then append the
-    // trailing PACKAGE_FILE_TAG sentinel (section 5).
-    // ------------------------------------------------------------------
+    // --- uexp ---
+    // Concatenate export bodies, then patch offsets.
     let mut uexp = Vec::new();
     for (i, e) in exports.iter_mut().enumerate() {
         let export_start_in_uexp = export_serial_offsets[i];
