@@ -1,3 +1,6 @@
+//! Convert Quake-style brushes into UE-space triangulated meshes.
+//! Largely written using Claude Code with access to Unreal Engine 5.1 source code.
+
 use glam::{DMat3, DVec3};
 use itertools::Itertools;
 use spade::{DelaunayTriangulation, Point2, Triangulation};

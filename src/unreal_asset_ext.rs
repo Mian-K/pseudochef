@@ -1,6 +1,5 @@
-//! Extensions to `unreal_asset`: deep (whole-subtree) operations on exports —
-//! cloning an export together with everything it owns, and deleting such a
-//! subtree in place.
+//! Extensions to `unreal_asset`: deep clone/delete exports.
+//! Largely written using Claude Code with access to Unreal Engine 5.1 source code.
 
 use crate::{find_export, find_import, with_name};
 use std::collections::{HashMap, HashSet};

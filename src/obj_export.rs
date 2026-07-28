@@ -1,5 +1,4 @@
-//! Writes a [`pseudocooker::MeshInput`] out as a Wavefront OBJ file, purely
-//! so the mesh can be visually inspected by importing it into Blender.
+//! Writes a [`pseudocooker::MeshInput`] out as an OBJ file for visual inspection in e.g. Blender.
 
 use pseudocooker::MeshInput;
 use std::io::{self, Write};
