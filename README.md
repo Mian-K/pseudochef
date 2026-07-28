@@ -1,10 +1,7 @@
 # pseudochef
 
-Contents:
+[TrenchBroom](https://trenchbroom.github.io/) integration for making custom maps for [Pseudoregalia](https://store.steampowered.com/app/2365810/Pseudoregalia/).
 
-- Boilerplate TrenchBroom game config (needs to be edited)
-- pseudochef.exe: a tool for cooking maps
+## Get started
 
-See also:
-
-[quickstart mod](https://www.nexusmods.com/pseudoregalia/mods/113)
+Download the [latest release](https://github.com/turncoda/pseudochef/releases/latest). Follow the included instructions.

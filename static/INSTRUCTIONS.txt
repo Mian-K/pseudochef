@@ -1,0 +1,67 @@
+=======
+ Setup
+=======
+
+--- Install the Pseudoregalia TrenchBroom game config ---
+
+    The "Pseudoregalia" folder in this archive is the TrenchBroom game config;
+    editor settings, entity definitions, etc. Copy it to your TrenchBroom user
+    config under "games". For example, on Windows, it should look like this:
+
+        C:\Users\<name>\AppData\Roaming\TrenchBroom\games\Pseudoregalia
+
+    You can check that you did it correctly if you now see a game preset for
+    "Pseudoregalia" when you start a new map in TrenchBroom.
+
+    Note that TrenchBroom's config folder is platform-dependent:
+
+        Windows	C:\Users\<name>\AppData\Roaming\TrenchBroom
+        macOS	~/Library/Application Support/TrenchBroom
+        Linux	~/.TrenchBroom
+
+--- Tell TrenchBroom where your game directory and build tools are ---
+
+    The next time you open TrenchBroom, go to Preferences. Select the
+    'Pseudoregalia' profile in the list on the left. Locate your game's
+    directory and put it in the box labeled 'Game Path'. For example, my game
+    path is:
+
+        C:\Program Files (x86)\Steam\steamapps\common\Pseudoregalia\
+
+    Under 'Compilation Tools', for 'pseudochef', put in the path to
+    'pseudochef.exe'. For 'quickstart', put in the path to 'quickstart_p.pak'.
+
+    This step sets important variables that are critical for the next step to
+    work correctly.
+
+--- Edit the map, build it and load it into the game ---
+
+    Go ahead and make some changes to the map. Make sure to save, or the next
+    step won't work.
+
+    Now under 'Run', click 'Compile Map...'. You should see the compilation
+    profile I've prepared. If you've done the previous step correctly, and
+    you've saved your map somewhere, clicking 'Compile' will build the map into
+    a .pak file, install it into your game path, and load it up in the game.
+
+======
+ Help
+======
+
+    For information on how the various entities work and interact with each
+    other, see the help text in the Entity tab on the right.
+
+=======
+ Notes
+=======
+
+    If you encounter any bugs, please report them at:
+
+        https://github.com/turncoda/pseudochef/issues
+
+    The code is open-source; contributions are welcome.
+
+
+    Have fun making maps!
+
+        ~ turncoda  2026.07.28

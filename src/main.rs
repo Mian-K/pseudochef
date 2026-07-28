@@ -1,3 +1,4 @@
+use std::path::Path;
 use glam::DVec3;
 use shalrath::parser::repr::parse_map;
 use std::collections::HashMap;
@@ -354,6 +355,8 @@ fn main() {
 
     assert_eq!(args.len(), 3, "usage: pseudochef IN_MAP OUT_PAK");
 
+    let in_path = Path::new(&args[1]);
+    let map_name = in_path.file_stem().unwrap().to_string_lossy();
     let map_contents = read_to_string(&args[1]).expect("failed to read map file");
 
     let (_, ast) = parse_map(&map_contents).expect("failed to parse map file");
@@ -390,7 +393,7 @@ fn main() {
                 for brush in &ent.brushes.0 {
                     num_world_brushes += 1;
                     let name = format!("WorldBrush{}", num_world_brushes);
-                    let (abs_path, origin) = pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
+                    let (abs_path, origin) = pak_add_brush(&mut pak, brush, &map_name, &name).unwrap();
                     let idx = add_static_mesh_import(&mut umap, &abs_path);
                     add_static_mesh_actor(&mut umap, idx, origin);
                 }
@@ -399,7 +402,7 @@ fn main() {
                 for brush in &ent.brushes.0 {
                     num_hazard_brushes += 1;
                     let name = format!("HazardBrush{}", num_hazard_brushes);
-                    let (abs_path, origin) = pak_add_brush(&mut pak, brush, "slop", &name).unwrap();
+                    let (abs_path, origin) = pak_add_brush(&mut pak, brush, &map_name, &name).unwrap();
                     let idx = add_static_mesh_import(&mut umap, &abs_path);
                     add_hazard_actor(&mut umap, idx, origin);
                 }
@@ -411,7 +414,8 @@ fn main() {
                     .collect();
                 let origin = DVec3::from_slice(&numbers);
                 let origin = tb_space_to_unreal_space(origin);
-                add_player_start(&mut umap, origin, &props["targetname"]);
+                let tag = props.get("targetname").map(|s| s.as_str()).unwrap_or("gameStart");
+                add_player_start(&mut umap, origin, tag);
             }
             _ => {}
         };
@@ -421,7 +425,7 @@ fn main() {
 
     // rename level export (for swag only; seemingly inconsequential)
     {
-        let fname = umap.add_fname("pseudochef_slop");
+        let fname = umap.add_fname(&map_name);
         let idx = find_export(&umap, &[with_name("mise")]).expect("couldn't find mise");
         let export = umap.get_export_mut(idx).unwrap();
         export.get_base_export_mut().object_name = fname;
@@ -447,13 +451,15 @@ fn main() {
     umap.write_data(&mut final_umap, Some(&mut final_uexp))
         .expect("failed to serialize umap");
 
-    //std::fs::write("slop.umap", final_umap.get_ref()).unwrap();
-    //std::fs::write("slop.uexp", final_uexp.get_ref()).unwrap();
+    std::fs::write("dbg.umap", final_umap.get_ref()).unwrap();
+    std::fs::write("dbg.uexp", final_uexp.get_ref()).unwrap();
 
     // TODO also rename mise export
-    pak.write_file("Mods/Maps/slop.umap", true, final_umap.get_ref())
+    let umap_path = format!("Mods/Maps/{}.umap", map_name);
+    let uexp_path = format!("Mods/Maps/{}.uexp", map_name);
+    pak.write_file(&umap_path, true, final_umap.get_ref())
         .expect("failed to write umap to pak");
-    pak.write_file("Mods/Maps/slop.uexp", true, final_uexp.get_ref())
+    pak.write_file(&uexp_path, true, final_uexp.get_ref())
         .expect("failed to write uexp to pak");
 
     for (name, bytes) in MISE_FILES {
