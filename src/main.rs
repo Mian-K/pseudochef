@@ -1,9 +1,9 @@
-use std::path::Path;
 use glam::DVec3;
 use shalrath::parser::repr::parse_map;
 use std::collections::HashMap;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
+use std::path::Path;
 use std::time::Instant;
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
@@ -62,9 +62,9 @@ fn with_import<'a, C: Read + Seek>(
                 && obj_prop
                     .name
                     .get_content(|content| content == obj_prop_name)
-                {
-                    matching_prop = Some(obj_prop);
-                }
+            {
+                matching_prop = Some(obj_prop);
+            }
         }
 
         let Some(prop) = matching_prop else {
@@ -98,9 +98,10 @@ fn find_export<C: Read + Seek>(
     let mut maybe_idx = None;
     for (i, export) in asset.asset_data.exports.iter().enumerate() {
         if let Some(normal_export) = export.get_normal_export()
-            && constraints.iter().all(|f| f(asset, normal_export)) {
-                maybe_idx = Some(PackageIndex::new((i + 1) as i32));
-            }
+            && constraints.iter().all(|f| f(asset, normal_export))
+        {
+            maybe_idx = Some(PackageIndex::new((i + 1) as i32));
+        }
     }
     maybe_idx
 }
@@ -113,13 +114,14 @@ fn find_vec_property_mut<'a>(
     let props = &mut export.get_normal_export_mut().unwrap().properties;
     for prop in props {
         if let unreal_asset::properties::Property::StructProperty(struct_prop) = prop
-            && struct_prop.name.get_content(|content| content == name) {
-                for prop in &mut struct_prop.value {
-                    if let unreal_asset::properties::Property::VectorProperty(vec_prop) = prop {
-                        result = Some(vec_prop);
-                    }
+            && struct_prop.name.get_content(|content| content == name)
+        {
+            for prop in &mut struct_prop.value {
+                if let unreal_asset::properties::Property::VectorProperty(vec_prop) = prop {
+                    result = Some(vec_prop);
                 }
             }
+        }
     }
     result
 }
@@ -132,9 +134,10 @@ fn find_obj_property<'a>(
     let props = &export.get_normal_export().unwrap().properties;
     for prop in props {
         if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop
-            && obj_prop.name.get_content(|content| content == name) {
-                result = Some(obj_prop);
-            }
+            && obj_prop.name.get_content(|content| content == name)
+        {
+            result = Some(obj_prop);
+        }
     }
     result
 }
@@ -147,9 +150,10 @@ fn find_name_property_mut<'a>(
     let props = &mut export.get_normal_export_mut().unwrap().properties;
     for prop in props {
         if let unreal_asset::properties::Property::NameProperty(name_prop) = prop
-            && name_prop.name.get_content(|content| content == key) {
-                result = Some(name_prop);
-            }
+            && name_prop.name.get_content(|content| content == key)
+        {
+            result = Some(name_prop);
+        }
     }
     result
 }
@@ -162,9 +166,10 @@ fn find_obj_property_mut<'a>(
     let props = &mut export.get_normal_export_mut().unwrap().properties;
     for prop in props {
         if let unreal_asset::properties::Property::ObjectProperty(obj_prop) = prop
-            && obj_prop.name.get_content(|content| content == name) {
-                result = Some(obj_prop);
-            }
+            && obj_prop.name.get_content(|content| content == name)
+        {
+            result = Some(obj_prop);
+        }
     }
     result
 }
@@ -220,8 +225,9 @@ fn add_static_mesh_import<C: Read + Seek>(
     umap: &mut unreal_asset::Asset<C>,
     path: &str,
 ) -> PackageIndex {
-    let last_slash_idx = path.rfind('/').unwrap_or_else(|| panic!("invalid input to add_static_mesh_import: \"{}\"",
-        path));
+    let last_slash_idx = path
+        .rfind('/')
+        .unwrap_or_else(|| panic!("invalid input to add_static_mesh_import: \"{}\"", path));
     // Hardcode to find SM_ExampleBox and use it as the reference import.
     let idx1 = find_import(umap, "Package", "/Game/Mods/Maps/mise/SM_ExampleBox").unwrap();
     let idx2 = find_import(umap, "StaticMesh", "SM_ExampleBox").unwrap();
@@ -304,8 +310,12 @@ fn set_obj_property(
         .create_before_serialization_dependencies
         .push(idx);
     // this error message should really be in the function.
-    let prop = find_obj_property_mut(export, object_name).unwrap_or_else(|| panic!("couldn't find object property \"{}\" in {}",
-        object_name, export_name));
+    let prop = find_obj_property_mut(export, object_name).unwrap_or_else(|| {
+        panic!(
+            "couldn't find object property \"{}\" in {}",
+            object_name, export_name
+        )
+    });
     prop.value = idx;
 }
 
@@ -325,8 +335,10 @@ fn set_location(export: &mut unreal_asset::Export<PackageIndex>, location: DVec3
 fn find_original_static_mesh_actor<C: Read + Seek>(umap: &unreal_asset::Asset<C>) -> PackageIndex {
     let idx = find_export(
         umap,
-        &[with_name("StaticMeshComponent0"),
-            with_import("StaticMesh", "SM_ExampleBox")],
+        &[
+            with_name("StaticMeshComponent0"),
+            with_import("StaticMesh", "SM_ExampleBox"),
+        ],
     )
     .unwrap();
     let export = umap.get_export(idx).unwrap();
@@ -393,7 +405,8 @@ fn main() {
                 for brush in &ent.brushes.0 {
                     num_world_brushes += 1;
                     let name = format!("WorldBrush{}", num_world_brushes);
-                    let (abs_path, origin) = pak_add_brush(&mut pak, brush, &map_name, &name).unwrap();
+                    let (abs_path, origin) =
+                        pak_add_brush(&mut pak, brush, &map_name, &name).unwrap();
                     let idx = add_static_mesh_import(&mut umap, &abs_path);
                     add_static_mesh_actor(&mut umap, idx, origin);
                 }
@@ -402,7 +415,8 @@ fn main() {
                 for brush in &ent.brushes.0 {
                     num_hazard_brushes += 1;
                     let name = format!("HazardBrush{}", num_hazard_brushes);
-                    let (abs_path, origin) = pak_add_brush(&mut pak, brush, &map_name, &name).unwrap();
+                    let (abs_path, origin) =
+                        pak_add_brush(&mut pak, brush, &map_name, &name).unwrap();
                     let idx = add_static_mesh_import(&mut umap, &abs_path);
                     add_hazard_actor(&mut umap, idx, origin);
                 }
@@ -414,7 +428,10 @@ fn main() {
                     .collect();
                 let origin = DVec3::from_slice(&numbers);
                 let origin = tb_space_to_unreal_space(origin);
-                let tag = props.get("targetname").map(|s| s.as_str()).unwrap_or("gameStart");
+                let tag = props
+                    .get("targetname")
+                    .map(|s| s.as_str())
+                    .unwrap_or("gameStart");
                 add_player_start(&mut umap, origin, tag);
             }
             _ => {}
