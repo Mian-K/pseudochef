@@ -216,7 +216,10 @@ fn find_import<C: Read + Seek>(
 fn add_actor_to_level<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageIndex) {
     let level_idx = find_export(asset, &[with_name("PersistentLevel")]).unwrap();
     let export = asset.get_export_mut(level_idx).unwrap();
-    export.get_base_export_mut().create_before_serialization_dependencies.push(idx);
+    export
+        .get_base_export_mut()
+        .create_before_serialization_dependencies
+        .push(idx);
     if let unreal_asset::Export::LevelExport(level_export) = export {
         level_export.actors.push(idx);
     } else {
@@ -268,13 +271,18 @@ fn add_static_mesh_import<C: Read + Seek>(
     umap.add_import(import2c)
 }
 
-fn add_save_point<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, location: DVec3) {
+fn add_save_point<C: Read + Seek>(
+    umap: &mut unreal_asset::Asset<C>,
+    location: DVec3,
+) -> PackageIndex {
     let idx = find_export(umap, &[with_name("BP_SavePoint_C")]).unwrap();
     let idx = deep_clone_export(umap, idx);
     add_actor_to_level(umap, idx);
 
     let root = get_linked_export_mut(umap, idx, "RootComponent").unwrap();
     set_location(root, location);
+
+    idx
 }
 
 fn add_jump_bubble<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, location: DVec3) {
@@ -291,7 +299,7 @@ fn add_player_start<C: Read + Seek>(
     location: DVec3,
     yaw: i16,
     tag: &str,
-) {
+) -> PackageIndex {
     let idx = find_export(umap, &[with_name("PlayerStart")]).unwrap();
     let idx = deep_clone_export(umap, idx);
     add_actor_to_level(umap, idx);
@@ -303,6 +311,8 @@ fn add_player_start<C: Read + Seek>(
     let root = get_linked_export_mut(umap, idx, "RootComponent").unwrap();
     set_location(root, location);
     set_yaw(root, yaw);
+
+    idx
 }
 
 fn add_hazard_actor<C: Read + Seek>(
@@ -351,9 +361,11 @@ fn set_obj_property(
 ) {
     let base_export = export.get_base_export_mut();
     let export_name = base_export.object_name.get_owned_content();
-    base_export
-        .create_before_serialization_dependencies
-        .push(idx);
+    if idx.index != 0 {
+        base_export
+            .create_before_serialization_dependencies
+            .push(idx);
+    }
     // this error message should really be in the function.
     let prop = find_obj_property_mut(export, object_name).unwrap_or_else(|| {
         panic!(
@@ -445,6 +457,8 @@ fn main() {
 
     let mut num_world_brushes = 0;
     let mut num_hazard_brushes = 0;
+    let mut player_starts = HashMap::<String, PackageIndex>::new();
+    let mut save_points = Vec::<(PackageIndex, String)>::new();
     let start = Instant::now();
     for ent in ast.0 {
         let props: HashMap<String, String> = ent
@@ -485,11 +499,9 @@ fn main() {
                 let angle: i16 = props.get("angle").map(|s| s.parse().unwrap()).unwrap_or(0);
                 // Switch from TrenchBroom's right-handed coordinate system to Unreal's left-handed one.
                 let angle = -angle;
-                let tag = props
-                    .get("targetname")
-                    .map(|s| s.as_str())
-                    .unwrap_or("gameStart");
-                add_player_start(&mut umap, origin, angle, tag);
+                let tag = props.get("tag").map(|s| s.as_str()).unwrap_or("gameStart");
+                let idx = add_player_start(&mut umap, origin, angle, tag);
+                player_starts.insert(tag.to_string(), idx);
             }
             "misc_jump_bubble" => {
                 let origin: Vec<f64> = props["origin"]
@@ -509,13 +521,32 @@ fn main() {
                 let origin = DVec3::from_slice(&origin);
                 let origin = tb_space_to_unreal_space(origin);
 
-                add_save_point(&mut umap, origin);
+                let target = props
+                    .get("target")
+                    .map(|s| s.as_str())
+                    .unwrap_or("gameStart")
+                    .to_string();
+                let idx = add_save_point(&mut umap, origin);
+                save_points.push((idx, target));
             }
             _ => {}
         };
     }
     let elapsed = start.elapsed();
     println!("Mesh generation completed in {}ms", elapsed.as_millis());
+
+    println!("Linking actors...");
+    for (save_idx, save_target) in save_points {
+        let save_export = umap.get_export_mut(save_idx).unwrap();
+        let start_idx = if let Some(idx) = player_starts.get(&save_target) {
+            println!("save_point {} -> player_start {}", save_idx, idx.index);
+            *idx
+        } else {
+            println!("Warning: target '{}' not found", save_target);
+            PackageIndex::new(0)
+        };
+        set_obj_property(save_export, "associatedPlayerStart", start_idx);
+    }
 
     // rename level export (for swag only; seemingly inconsequential)
     {
