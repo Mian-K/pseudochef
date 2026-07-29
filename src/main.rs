@@ -106,6 +106,26 @@ fn find_export<C: Read + Seek>(
     maybe_idx
 }
 
+fn find_rot_property_mut<'a>(
+    export: &'a mut unreal_asset::Export<PackageIndex>,
+    name: &str,
+) -> Option<&'a mut unreal_asset::properties::vector_property::RotatorProperty> {
+    let mut result = None;
+    let props = &mut export.get_normal_export_mut().unwrap().properties;
+    for prop in props {
+        if let unreal_asset::properties::Property::StructProperty(struct_prop) = prop
+            && struct_prop.name.get_content(|content| content == name)
+        {
+            for prop in &mut struct_prop.value {
+                if let unreal_asset::properties::Property::RotatorProperty(rot_prop) = prop {
+                    result = Some(rot_prop);
+                }
+            }
+        }
+    }
+    result
+}
+
 fn find_vec_property_mut<'a>(
     export: &'a mut unreal_asset::Export<PackageIndex>,
     name: &str,
@@ -247,7 +267,12 @@ fn add_static_mesh_import<C: Read + Seek>(
     umap.add_import(import2c)
 }
 
-fn add_player_start<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, origin: DVec3, tag: &str) {
+fn add_player_start<C: Read + Seek>(
+    umap: &mut unreal_asset::Asset<C>,
+    location: DVec3,
+    yaw: i16,
+    tag: &str,
+) {
     let idx = find_export(umap, &[with_name("PlayerStart")]).unwrap();
     let idx = deep_clone_export(umap, idx);
     add_actor_to_level(umap, idx);
@@ -257,7 +282,8 @@ fn add_player_start<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, origin: D
     set_name_property(export, "PlayerStartTag", tag);
 
     let root = get_linked_export_mut(umap, idx, "RootComponent").unwrap();
-    set_location(root, origin);
+    set_location(root, location);
+    set_yaw(root, yaw);
 }
 
 fn add_hazard_actor<C: Read + Seek>(
@@ -317,6 +343,14 @@ fn set_obj_property(
         )
     });
     prop.value = idx;
+}
+
+fn set_yaw(export: &mut unreal_asset::Export<PackageIndex>, yaw: i16) {
+    let prop = find_rot_property_mut(export, "RelativeRotation")
+        .expect("couldn't find RelativeRotation property");
+    prop.value.y.0 = yaw as f64;
+    // For some reason, unreal_asset's RotatorProperty uses Y for yaw, whereas Unreal Engine seems
+    // to use Z for yaw, or at least it looks that way in the editor.
 }
 
 fn set_location(export: &mut unreal_asset::Export<PackageIndex>, location: DVec3) {
@@ -422,17 +456,21 @@ fn main() {
                 }
             }
             "info_player_start" => {
-                let numbers: Vec<f64> = props["origin"]
+                let origin: Vec<f64> = props["origin"]
                     .split_whitespace()
                     .map(|n| n.parse().unwrap())
                     .collect();
-                let origin = DVec3::from_slice(&numbers);
+                let origin = DVec3::from_slice(&origin);
                 let origin = tb_space_to_unreal_space(origin);
+
+                let angle: i16 = props.get("angle").map(|s| s.parse().unwrap()).unwrap_or(0);
+                // Switch from TrenchBroom's right-handed coordinate system to Unreal's left-handed one.
+                let angle = -angle;
                 let tag = props
                     .get("targetname")
                     .map(|s| s.as_str())
                     .unwrap_or("gameStart");
-                add_player_start(&mut umap, origin, tag);
+                add_player_start(&mut umap, origin, angle, tag);
             }
             _ => {}
         };
