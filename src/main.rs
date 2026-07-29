@@ -268,6 +268,15 @@ fn add_static_mesh_import<C: Read + Seek>(
     umap.add_import(import2c)
 }
 
+fn add_save_point<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, location: DVec3) {
+    let idx = find_export(umap, &[with_name("BP_SavePoint_C")]).unwrap();
+    let idx = deep_clone_export(umap, idx);
+    add_actor_to_level(umap, idx);
+
+    let root = get_linked_export_mut(umap, idx, "RootComponent").unwrap();
+    set_location(root, location);
+}
+
 fn add_jump_bubble<C: Read + Seek>(umap: &mut unreal_asset::Asset<C>, location: DVec3) {
     let idx = find_export(umap, &[with_name("BP_JumpBubble_C")]).unwrap();
     let idx = deep_clone_export(umap, idx);
@@ -455,7 +464,7 @@ fn main() {
                     add_static_mesh_actor(&mut umap, idx, origin);
                 }
             }
-            "trigger_hazard" => {
+            "trigger_hazard_zone" => {
                 for brush in &ent.brushes.0 {
                     num_hazard_brushes += 1;
                     let name = format!("HazardBrush{}", num_hazard_brushes);
@@ -491,6 +500,16 @@ fn main() {
                 let origin = tb_space_to_unreal_space(origin);
 
                 add_jump_bubble(&mut umap, origin);
+            }
+            "misc_save_point" => {
+                let origin: Vec<f64> = props["origin"]
+                    .split_whitespace()
+                    .map(|n| n.parse().unwrap())
+                    .collect();
+                let origin = DVec3::from_slice(&origin);
+                let origin = tb_space_to_unreal_space(origin);
+
+                add_save_point(&mut umap, origin);
             }
             _ => {}
         };
