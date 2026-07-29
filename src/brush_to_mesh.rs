@@ -22,7 +22,7 @@ fn calculate_normal(plane: &shalrath::repr::TrianglePlane) -> DVec3 {
 fn flip_y(point: &mut shalrath::repr::Point) {
     point.y = -point.y;
 }
-pub fn tb_space_to_unreal_space(mut a: DVec3) -> DVec3 {
+pub fn tb_space_to_ue_space(mut a: DVec3) -> DVec3 {
     a.y = -a.y;
     a *= TB_TO_UNREAL_SCALE as f64;
     a

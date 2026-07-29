@@ -10,7 +10,7 @@ use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::types::PackageIndex;
 
 mod brush_to_mesh;
-use brush_to_mesh::{convert_to_mesh, tb_space_to_unreal_space};
+use brush_to_mesh::{convert_to_mesh, tb_space_to_ue_space};
 
 mod unreal_asset_ext;
 use unreal_asset_ext::{deep_clone_export, deep_delete_export};
@@ -427,6 +427,12 @@ fn add_static_mesh_actor<C: Read + Seek>(
     set_location(export4, origin);
 }
 
+fn tb_vec3_to_ue_dvec3(s: &str) -> DVec3 {
+    let v: Vec<f64> = s.split_whitespace().map(|n| n.parse().unwrap()).collect();
+    let dv = DVec3::from_slice(&v);
+    tb_space_to_ue_space(dv)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -461,13 +467,16 @@ fn main() {
     let mut save_points = Vec::<(PackageIndex, String)>::new();
     let start = Instant::now();
     for ent in ast.0 {
-        let props: HashMap<String, String> = ent
+        let props: HashMap<&str, &str> = ent
             .properties
             .0
-            .into_iter()
-            .map(|p| (p.key, p.value))
+            .iter()
+            .map(|p| (p.key.as_ref(), p.value.as_ref()))
             .collect();
-        match props["classname"].as_ref() {
+        let Some(&classname) = props.get("classname") else {
+            continue;
+        };
+        match classname {
             "worldspawn" => {
                 for brush in &ent.brushes.0 {
                     num_world_brushes += 1;
@@ -489,43 +498,20 @@ fn main() {
                 }
             }
             "info_player_start" => {
-                let origin: Vec<f64> = props["origin"]
-                    .split_whitespace()
-                    .map(|n| n.parse().unwrap())
-                    .collect();
-                let origin = DVec3::from_slice(&origin);
-                let origin = tb_space_to_unreal_space(origin);
-
+                let origin = tb_vec3_to_ue_dvec3(props.get("origin").unwrap_or(&"0 0 0"));
                 let angle: i16 = props.get("angle").map(|s| s.parse().unwrap()).unwrap_or(0);
-                // Switch from TrenchBroom's right-handed coordinate system to Unreal's left-handed one.
-                let angle = -angle;
-                let tag = props.get("tag").map(|s| s.as_str()).unwrap_or("gameStart");
+                let angle = -angle; // TB (right-handed) to UE (left-handed)
+                let tag = props.get("tag").unwrap_or(&"gameStart");
                 let idx = add_player_start(&mut umap, origin, angle, tag);
                 player_starts.insert(tag.to_string(), idx);
             }
             "misc_jump_bubble" => {
-                let origin: Vec<f64> = props["origin"]
-                    .split_whitespace()
-                    .map(|n| n.parse().unwrap())
-                    .collect();
-                let origin = DVec3::from_slice(&origin);
-                let origin = tb_space_to_unreal_space(origin);
-
+                let origin = tb_vec3_to_ue_dvec3(props.get("origin").unwrap_or(&"0 0 0"));
                 add_jump_bubble(&mut umap, origin);
             }
             "misc_save_point" => {
-                let origin: Vec<f64> = props["origin"]
-                    .split_whitespace()
-                    .map(|n| n.parse().unwrap())
-                    .collect();
-                let origin = DVec3::from_slice(&origin);
-                let origin = tb_space_to_unreal_space(origin);
-
-                let target = props
-                    .get("target")
-                    .map(|s| s.as_str())
-                    .unwrap_or("gameStart")
-                    .to_string();
+                let origin = tb_vec3_to_ue_dvec3(props.get("origin").unwrap_or(&"0 0 0"));
+                let target = props.get("target").unwrap_or(&"gameStart").to_string();
                 let idx = add_save_point(&mut umap, origin);
                 save_points.push((idx, target));
             }
@@ -533,16 +519,24 @@ fn main() {
         };
     }
     let elapsed = start.elapsed();
-    println!("Mesh generation completed in {}ms", elapsed.as_millis());
+    println!("World brushes: {}", num_world_brushes);
+    println!("Hazard brushes: {}", num_hazard_brushes);
+    println!("Generated level in {} ms.", elapsed.as_millis());
 
     println!("Linking actors...");
     for (save_idx, save_target) in save_points {
         let save_export = umap.get_export_mut(save_idx).unwrap();
         let start_idx = if let Some(idx) = player_starts.get(&save_target) {
-            println!("save_point {} -> player_start {}", save_idx, idx.index);
+            println!(
+                "save_point @{} -> player_start @{} ({})",
+                save_idx, idx.index, save_target
+            );
             *idx
         } else {
-            println!("Warning: target '{}' not found", save_target);
+            println!(
+                "Warning: save_point @{} could not find player_start with tag: {}",
+                save_idx, save_target
+            );
             PackageIndex::new(0)
         };
         set_obj_property(save_export, "associatedPlayerStart", start_idx);
