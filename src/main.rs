@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs::{File, read_to_string};
 use std::io::{Read, Seek, Write};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use unreal_asset::exports::ExportBaseTrait;
 use unreal_asset::exports::ExportNormalTrait;
 use unreal_asset::types::PackageIndex;
@@ -521,7 +521,10 @@ fn main() {
     let elapsed = start.elapsed();
     println!("World brushes: {}", num_world_brushes);
     println!("Hazard brushes: {}", num_hazard_brushes);
-    println!("Generated level in {} ms.", elapsed.as_millis());
+    println!(
+        "Generated level in {}.",
+        humantime::format_duration(Duration::from_millis(elapsed.as_millis() as u64))
+    );
 
     println!("Linking actors...");
     for (save_idx, save_target) in save_points {
