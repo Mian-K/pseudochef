@@ -4,7 +4,7 @@
 @baseclass size(-16 -16 -24, 16 16 32) color(0 255 255) = SaveClass []
 
 @PointClass base(PlayerClass) = info_player_start :
-    "If you specify 'tag', you can target it from an info_save_point. " +
+    "If you specify 'tag', you can target it from a save_point. " +
     "You can also start the game with '-spawn=<targetname>' on the command " +
     "line (using the quickstart mod) to spawn there on game start."
 [
@@ -12,19 +12,21 @@
     angle(integer) : "Direction. Default is 0 (+X)"
 ]
 
-@PointClass base(SaveClass) = info_save_point :
-    "You can target an info_player_start by putting its 'tag' into this " +
+@PointClass base(SaveClass) = misc_save_point :
+    "You can target a player_start by putting its 'tag' into this " +
     "entity's 'target' property."
 [
     target(target_destination) : "Target"
 ]
 
-@SolidClass = trigger_hazard :
-    "Upon collision, player is warped back to last touched trigger_safe."
+@PointClass = misc_jump_bubble : "Jump bubble." []
+
+@SolidClass = trigger_hazard_zone :
+    "Upon collision, player is warped back to last touched safe_zone."
 []
 
-@SolidClass = trigger_safe :
+@SolidClass = trigger_safe_zone :
     "Functions as a soft invisible checkpoint. Upon collision with a " +
-    "trigger_hazard, player is warped back to last touched trigger_safe. " +
+    "hazard_zone, player is warped back to last touched safe_zone. " +
     "State is not preserved on reload."
 []
