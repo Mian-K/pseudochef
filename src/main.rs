@@ -216,6 +216,7 @@ fn find_import<C: Read + Seek>(
 fn add_actor_to_level<C: Read + Seek>(asset: &mut unreal_asset::Asset<C>, idx: PackageIndex) {
     let level_idx = find_export(asset, &[with_name("PersistentLevel")]).unwrap();
     let export = asset.get_export_mut(level_idx).unwrap();
+    export.get_base_export_mut().create_before_serialization_dependencies.push(idx);
     if let unreal_asset::Export::LevelExport(level_export) = export {
         level_export.actors.push(idx);
     } else {
