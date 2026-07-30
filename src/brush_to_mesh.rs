@@ -50,32 +50,8 @@ fn mirror_xz(brush: &shalrath::repr::Brush) -> shalrath::repr::Brush {
     }
     shalrath::repr::Brush::new(planes)
 }
-/// `target_vertex_spacing` is the approximate world-space distance between
-/// generated vertices on each face, both along its boundary edges and in its
-/// interior; smaller values give a denser, more uniform mesh (useful for
-/// even per-vertex lighting, including along the edges where adjacent
-/// brushes meet). A value <= 0.0 disables subdivision, leaving each face as
-/// just its original corners (still Delaunay-triangulated, unlike the old
-/// vertex-fan).
-///
-/// Returns the mesh together with the world-space `origin` it's relative to:
-/// a deterministically-chosen brush vertex (one of the plane intersections,
-/// not a subdivided/interior point), so that placing the mesh at `origin` in
-/// the world reproduces its original position. Positions in the returned
-/// mesh are all relative to this origin rather than world-space, which keeps
-/// the mesh's own coordinates small and independent of where the brush sits
-/// in the map.
-pub fn convert_to_mesh(
-    brush: &shalrath::repr::Brush,
-    target_vertex_spacing: f64, // tb space
-) -> (pseudocooker::MeshInput, DVec3) {
-    // TrenchBroom uses a right-handed coordinate system with +z pointing up.
-    // Unreal uses a left-handed coordinate system with +z pointing up.
-    // So, we mirror across the xz-plane when converting.
-    // Also, we scale up to visually align with Unreal distance units.
-    let mut brush = mirror_xz(brush);
-    scale_brush(&mut brush, TB_TO_UNREAL_SCALE);
 
+fn compute_vertices(brush: &shalrath::repr::Brush) -> Vec<Vec<DVec3>> {
     let planes: Vec<_> = brush.0.iter().map(|plane| plane.plane).collect();
     let normals: Vec<_> = planes.iter().map(calculate_normal).collect();
     // Determinant threshold for treating three plane normals as linearly independent
@@ -102,7 +78,12 @@ pub fn convert_to_mesh(
     // that plane's sign came out inverted -- rejecting every true vertex not
     // on the plane itself and leaving most faces empty.)
     let mut vertices = vec![vec![]; brush.0.len()];
-    for c in planes.iter().zip(normals.iter()).enumerate().combinations(3) {
+    for c in planes
+        .iter()
+        .zip(normals.iter())
+        .enumerate()
+        .combinations(3)
+    {
         let (i0, (p0, n0)) = c[0];
         let (i1, (p1, n1)) = c[1];
         let (i2, (p2, n2)) = c[2];
@@ -150,6 +131,36 @@ pub fn convert_to_mesh(
             }
         }
     }
+    vertices
+}
+
+/// `target_vertex_spacing` is the approximate world-space distance between
+/// generated vertices on each face, both along its boundary edges and in its
+/// interior; smaller values give a denser, more uniform mesh (useful for
+/// even per-vertex lighting, including along the edges where adjacent
+/// brushes meet). A value <= 0.0 disables subdivision, leaving each face as
+/// just its original corners (still Delaunay-triangulated, unlike the old
+/// vertex-fan).
+///
+/// Returns the mesh together with the world-space `origin` it's relative to:
+/// a deterministically-chosen brush vertex (one of the plane intersections,
+/// not a subdivided/interior point), so that placing the mesh at `origin` in
+/// the world reproduces its original position. Positions in the returned
+/// mesh are all relative to this origin rather than world-space, which keeps
+/// the mesh's own coordinates small and independent of where the brush sits
+/// in the map.
+pub fn convert_to_mesh(
+    brush: &shalrath::repr::Brush,
+    target_vertex_spacing: f64, // tb space
+) -> (pseudocooker::MeshInput, DVec3) {
+    // TrenchBroom uses a right-handed coordinate system with +z pointing up.
+    // Unreal uses a left-handed coordinate system with +z pointing up.
+    // So, we mirror across the xz-plane when converting.
+    // Also, we scale up to visually align with Unreal distance units.
+    let mut brush = mirror_xz(brush);
+    scale_brush(&mut brush, TB_TO_UNREAL_SCALE);
+
+    let vertices = compute_vertices(&brush);
 
     // Pick a deterministic brush vertex (a real plane intersection, not a
     // subdivided or interior-sampled point) to serve as the mesh's origin.
@@ -171,6 +182,12 @@ pub fn convert_to_mesh(
     // is baked as an explicit per-face vertex normal so lighting doesn't
     // depend on winding at all. Keeping the two independent means fixing
     // lighting here can't also flip winding and break culling/collision.
+    let normals: Vec<_> = brush
+        .0
+        .iter()
+        .map(|plane| &plane.plane)
+        .map(calculate_normal)
+        .collect();
     let true_outward_normals: Vec<DVec3> = normals.iter().map(|n| -*n).collect();
 
     let mut positions = vec![];
