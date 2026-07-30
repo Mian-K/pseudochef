@@ -1,0 +1,27 @@
+name: Check PR Windows
+
+on:
+  pull_request:
+  push:
+    branches: [ "main" ]
+
+env:
+  # Disable incremental compilation for faster from-scratch builds
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --verbose --release
+    - name: Arrange Build Artifact
+      run: copy target\release\pseudochef.exe static\pseudochef.exe
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: pseudochef.zip
+        path: static\*
+        retention-days: 7
