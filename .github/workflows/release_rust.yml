@@ -1,0 +1,41 @@
+name: On Release
+on: 
+  release:
+    types: [published]
+permissions:
+  contents: write
+  
+env:
+  # Disable incremental compilation for faster from-scratch builds
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Commit
+        uses: actions/checkout@v6
+      - name: Build
+        run: cargo build --verbose --release
+      - name: Package Release Windows
+        if: contains(matrix.os, 'windows')
+        run: |
+          copy target\release\pseudochef.exe static\pseudochef.exe
+          tar -caf pseudochef-Windows.zip static\*
+      - name: Package Release Linux
+        if: contains(matrix.os, 'ubuntu')
+        run: |
+          cp target/release/pseudochef static/pseudochef
+          cd static
+          tar czf ../pseudochef-Linux.tar.gz *
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: pseudochef-*.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
