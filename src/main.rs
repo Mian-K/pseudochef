@@ -22,6 +22,21 @@ mod obj_export;
 const MISE_FILES: &[(&str, &[u8])] = &[
     ("BP_Hazard.uasset", include_bytes!("mise/BP_Hazard.uasset")),
     ("BP_Hazard.uexp", include_bytes!("mise/BP_Hazard.uexp")),
+    (
+        "BP_SafeZone.uasset",
+        include_bytes!("mise/BP_SafeZone.uasset"),
+    ),
+    ("BP_SafeZone.uexp", include_bytes!("mise/BP_SafeZone.uexp")),
+    (
+        "M_SafeZone_Inst.uasset",
+        include_bytes!("mise/M_SafeZone_Inst.uasset"),
+    ),
+    ("M_SafeZone_Inst.uexp", include_bytes!("mise/M_SafeZone_Inst.uexp")),
+    (
+        "M_SafeZone.uasset",
+        include_bytes!("mise/M_SafeZone.uasset"),
+    ),
+    ("M_SafeZone.uexp", include_bytes!("mise/M_SafeZone.uexp")),
     ("M_HazMat.uasset", include_bytes!("mise/M_HazMat.uasset")),
     ("M_HazMat.uexp", include_bytes!("mise/M_HazMat.uexp")),
     (
@@ -315,6 +330,22 @@ fn add_player_start<C: Read + Seek>(
     idx
 }
 
+fn add_safe_zone_actor<C: Read + Seek>(
+    umap: &mut unreal_asset::Asset<C>,
+    import_idx: PackageIndex,
+    origin: DVec3,
+) {
+    let idx = find_export(umap, &[with_name("BP_SafeZone_C")]).unwrap();
+    let idx = deep_clone_export(umap, idx);
+    add_actor_to_level(umap, idx);
+
+    let export_sm = get_linked_export_mut(umap, idx, "StaticMesh").unwrap();
+    set_obj_property(export_sm, "StaticMesh", import_idx);
+
+    let export_root = get_linked_export_mut(umap, idx, "DefaultSceneRoot").unwrap();
+    set_location(export_root, origin);
+}
+
 fn add_hazard_actor<C: Read + Seek>(
     umap: &mut unreal_asset::Asset<C>,
     import_idx: PackageIndex,
@@ -463,6 +494,7 @@ fn main() {
 
     let mut num_world_brushes = 0;
     let mut num_hazard_brushes = 0;
+    let mut num_safe_zone_brushes = 0;
     let mut player_starts = HashMap::<String, PackageIndex>::new();
     let mut save_points = Vec::<(PackageIndex, String)>::new();
     let start = Instant::now();
@@ -487,10 +519,21 @@ fn main() {
                     add_static_mesh_actor(&mut umap, idx, origin);
                 }
             }
+            "trigger_safe_zone" => {
+                for brush in &ent.brushes.0 {
+                    num_safe_zone_brushes += 1;
+                    let name = format!("SafeZoneBrush{}", num_safe_zone_brushes);
+
+                    let (abs_path, origin) =
+                        pak_add_brush(&mut pak, brush, &map_name, &name).unwrap();
+                    let idx = add_static_mesh_import(&mut umap, &abs_path);
+                    add_safe_zone_actor(&mut umap, idx, origin);
+                }
+            }
             "trigger_hazard_zone" => {
                 for brush in &ent.brushes.0 {
                     num_hazard_brushes += 1;
-                    let name = format!("HazardBrush{}", num_hazard_brushes);
+                    let name = format!("HazardZoneBrush{}", num_hazard_brushes);
                     let (abs_path, origin) =
                         pak_add_brush(&mut pak, brush, &map_name, &name).unwrap();
                     let idx = add_static_mesh_import(&mut umap, &abs_path);
@@ -520,7 +563,8 @@ fn main() {
     }
     let elapsed = start.elapsed();
     println!("World brushes: {}", num_world_brushes);
-    println!("Hazard brushes: {}", num_hazard_brushes);
+    println!("Hazard zone brushes: {}", num_hazard_brushes);
+    println!("Safe zone brushes: {}", num_safe_zone_brushes);
     println!(
         "Generated level in {}.",
         humantime::format_duration(Duration::from_millis(elapsed.as_millis() as u64))
@@ -557,6 +601,7 @@ fn main() {
     {
         let idxs = vec![
             find_export(&umap, &[with_name("BP_Hazard_C")]).unwrap(),
+            find_export(&umap, &[with_name("BP_SafeZone_C")]).unwrap(),
             find_export(&umap, &[with_name("BP_SavePoint_C")]).unwrap(),
             find_export(&umap, &[with_name("BP_JumpBubble_C")]).unwrap(),
             find_export(&umap, &[with_name("PlayerStart")]).unwrap(),
