@@ -26,7 +26,8 @@ jobs:
         if: contains(matrix.os, 'windows')
         run: |
           copy target\release\pseudochef.exe static\pseudochef.exe
-          tar -caf pseudochef-Windows.zip static\*
+          cd static
+          tar -caf ..\pseudochef-Windows.zip *
       - name: Package Release Linux
         if: contains(matrix.os, 'ubuntu')
         run: |
