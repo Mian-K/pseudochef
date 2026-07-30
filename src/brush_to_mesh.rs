@@ -134,6 +134,26 @@ fn compute_vertices(brush: &shalrath::repr::Brush) -> Vec<Vec<DVec3>> {
     vertices
 }
 
+pub struct AxisAlignedBoundingBox {
+    pub origin: DVec3,
+    pub extents: DVec3,
+}
+
+pub fn get_aabb(brush: &shalrath::repr::Brush) -> AxisAlignedBoundingBox {
+    let mut brush = mirror_xz(brush);
+    scale_brush(&mut brush, TB_TO_UNREAL_SCALE);
+    let vertices = compute_vertices(&brush);
+    let mut min = DVec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut max = DVec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    vertices.into_iter().flatten().for_each(|v| {
+        min = min.min(v);
+        max = max.max(v);
+    });
+    let origin = (max + min) / 2.0;
+    let extents = (max - min) / 2.0;
+    AxisAlignedBoundingBox { origin, extents }
+}
+
 /// `target_vertex_spacing` is the approximate world-space distance between
 /// generated vertices on each face, both along its boundary edges and in its
 /// interior; smaller values give a denser, more uniform mesh (useful for
